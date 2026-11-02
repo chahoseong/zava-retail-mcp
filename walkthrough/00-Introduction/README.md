@@ -2,9 +2,9 @@
 
 ## 이 모듈에서 다루는 내용
 
-`11-MCPServerHandsOnLabs`는 PostgreSQL을 백엔드로 사용하는 소매 분석 MCP 서버를 구축하는 **13개의 실습(Lab 00~12)**으로 구성된 학습 과정입니다. 데이터베이스 기능을 도구(Tools)로 외부에 노출하고, 행 수준 보안(Row Level Security, RLS)을 적용하여 매장별 데이터를 격리하며, 시맨틱 제품 검색(Semantic Product Search)을 추가하고, 테스트 및 운영 전반을 살펴봅니다.
+`zava-retail-mcp`는 PostgreSQL을 백엔드로 사용하는 소매 분석 MCP 서버를 구축하는 **13개의 실습(Lab 00~12)**으로 구성된 학습 과정입니다. 데이터베이스 기능을 도구(Tools)로 외부에 노출하고, 행 수준 보안(Row Level Security, RLS)을 적용하여 매장별 데이터를 격리하며, 시맨틱 제품 검색(Semantic Product Search)을 추가하고, 테스트 및 운영 전반을 살펴봅니다.
 
-본 실습의 사례 연구 대상은 가상의 DIY 소매업체인 **Zava Retail**입니다. 실습 과정에서 활용하는 실제 구현 코드는 부속 [소매 서버 저장소(retail server repository)](https://github.com/microsoft/MCP-Server-and-PostgreSQL-Sample-Retail)에서 제공합니다. 현재 커리큘럼 디렉터리에는 학습 문서와 주요 코드 스니펫이 수록되어 있으므로, 전체 애플리케이션 소스 코드와 의존성 파일은 해당 부속 프로젝트의 안내를 따라 준비하시기 바랍니다.
+이 학습 과정에서는 가상의 DIY 소매업체인 **Zava Retail**을 위한 소매 분석 MCP 서버를 구현합니다. 이 저장소의 `walkthrough/`에 있는 학습 문서를 따라 실행 환경을 구성하고, 데이터베이스와 MCP 서버, 업무 도구를 단계적으로 구현합니다. 구현 코드와 프로젝트 설정 파일은 이 저장소에서 함께 관리합니다.
 
 > [!IMPORTANT]
 > **2026년 10월 30일 공식 문서 기준 검토 완료.** 현재 공식 사양은 MCP `2026-07-28`입니다. 본 과정의 목표 서버 스택은 공식 `mcp` Python SDK입니다. 이후 실습 문서에는 독립형 FastMCP, 이전 방식인 HTTP+SSE, 초기화 핸드셰이크, 세션 기반 예제가 남아 있습니다. 공식 SDK 기반 구현으로 전환할 때는 클라이언트 및 SDK 릴리스의 호환성을 확인해야 합니다. 본 개요 문서는 후속 실습의 구현 코드를 직접 마이그레이션하지 않습니다. 자세한 내용은 [프로토콜 호환성 참고사항](#protocol-compatibility-notes)을 참조하세요.
