@@ -1,0 +1,328 @@
+{
+  "manifest_version": 1,
+  "description": "제공 CSV의 검증 기준값과 출처. 실습 중 추가한 테스트 데이터는 포함하지 않습니다.",
+  "csv_format": {
+    "encoding": "UTF-8",
+    "bom": false,
+    "line_ending": "LF",
+    "delimiter": ",",
+    "header": true,
+    "quote_character": "\"",
+    "null_marker": "\\N",
+    "boolean_values": [
+      "t",
+      "f"
+    ],
+    "decimal_values": "원본 십진수 문자열 보존",
+    "created_at_timezone": null
+  },
+  "source": {
+    "repository": "https://github.com/microsoft/MCP-Server-and-PostgreSQL-Sample-Retail",
+    "backup_url": "https://github.com/microsoft/MCP-Server-and-PostgreSQL-Sample-Retail/blob/main/data/zava_retail_2025_07_21_postgres_rls.backup",
+    "backup_file": "zava_retail_2025_07_21_postgres_rls.backup",
+    "backup_bytes": 12307528,
+    "git_blob_sha1": "98254ec3564b0e0418019c204b4730603ccb2194",
+    "sha256": "4527a1e0f6597de7ff95cd2442c3f9cd99b8c1407f55809307bf207dc7b807e1",
+    "backup_created_at": "2025-07-21T22:09:08Z",
+    "postgresql_version": "17.5",
+    "pg_dump_version": "17.0",
+    "license": "MIT",
+    "license_file": "LICENSE"
+  },
+  "extraction": {
+    "method": "백업 데이터의 PostgreSQL 텍스트 표현을 디코딩한 뒤 표준 CSV로 변환",
+    "preserved": [
+      "업무 데이터 8종의 전체 행과 열",
+      "행과 열의 순서",
+      "원본 식별자",
+      "십진수·날짜·문자열의 값"
+    ],
+    "verification": "추출 시 변환 전후 모든 필드와 건수를 대조했습니다. files의 SHA-256은 제공 CSV 바이트의 해시입니다.",
+    "excluded": {
+      "database_objects": [
+        "테이블 정의",
+        "계정",
+        "RLS 정책",
+        "트리거"
+      ],
+      "embedding_tables": {
+        "product_description_embeddings": {
+          "rows": 424,
+          "dimensions": 1536
+        },
+        "product_image_embeddings": {
+          "rows": 424,
+          "dimensions": 512
+        }
+      }
+    }
+  },
+  "files": {
+    "stores": {
+      "path": "source/stores.csv",
+      "columns": [
+        "store_id",
+        "store_name",
+        "rls_user_id",
+        "is_online"
+      ],
+      "rows": 8,
+      "bytes": 530,
+      "sha256": "6d93ab99074b1e3c8a2b44450ba5dd42775ba572b8d0b70a4b0e950936956947",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "categories": {
+      "path": "source/categories.csv",
+      "columns": [
+        "category_id",
+        "category_name"
+      ],
+      "rows": 9,
+      "bytes": 181,
+      "sha256": "c0b4728075792e1129a065ed8c82c81f7fe60406992dec926cba545e3e9b19f2",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "product_types": {
+      "path": "source/product_types.csv",
+      "columns": [
+        "type_id",
+        "category_id",
+        "type_name"
+      ],
+      "rows": 89,
+      "bytes": 1456,
+      "sha256": "54bfdaa6ef9820915d97173019f9c47b7605ec80ef45850c0e670b7315b80cb9",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "products": {
+      "path": "source/products.csv",
+      "columns": [
+        "product_id",
+        "sku",
+        "product_name",
+        "category_id",
+        "type_id",
+        "cost",
+        "base_price",
+        "gross_margin_percent",
+        "product_description"
+      ],
+      "rows": 424,
+      "bytes": 60066,
+      "sha256": "b02e09d78159df1391583afc254d4e3c59cd93a3e4b3a4ae3f45587fb2ac3156",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "customers": {
+      "path": "source/customers.csv",
+      "columns": [
+        "customer_id",
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "primary_store_id",
+        "created_at"
+      ],
+      "rows": 50000,
+      "bytes": 4781003,
+      "sha256": "9cd4b37776157c837a6c53918990f617a6ac02a6675b3eb20fd0ecea5528bfe0",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "orders": {
+      "path": "source/orders.csv",
+      "columns": [
+        "order_id",
+        "customer_id",
+        "store_id",
+        "order_date"
+      ],
+      "rows": 197665,
+      "bytes": 4984348,
+      "sha256": "fe5da1500300353bdfacba2ecc3911beed591c56fe32dd11de60210b650ffdad",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "order_items": {
+      "path": "source/order_items.csv",
+      "columns": [
+        "order_item_id",
+        "order_id",
+        "store_id",
+        "product_id",
+        "quantity",
+        "unit_price",
+        "discount_percent",
+        "discount_amount",
+        "total_amount"
+      ],
+      "rows": 414241,
+      "bytes": 16749907,
+      "sha256": "07f9c19e6343166da62426935ff830d70142f48d0eb9ea77da3d52a41d177b48",
+      "null_fields": 0,
+      "empty_fields": 0
+    },
+    "inventory": {
+      "path": "source/inventory.csv",
+      "columns": [
+        "store_id",
+        "product_id",
+        "stock_level"
+      ],
+      "rows": 3392,
+      "bytes": 34317,
+      "sha256": "ace9bd293f041e83fa58f76402a8d15e713327f2781c7136945b431b58d167c7",
+      "null_fields": 0,
+      "empty_fields": 0
+    }
+  },
+  "validation": {
+    "scope": "날짜나 추가 필터가 없는 제공 데이터 전체",
+    "totals": {
+      "rows": 665828,
+      "bytes": 26611808,
+      "quantity": 670351,
+      "total_amount": "46184647.52"
+    },
+    "metric_definitions": {
+      "orders": "orders의 행 수",
+      "order_items": "order_items의 행 수",
+      "quantity": "order_items.quantity의 합",
+      "total_amount": "order_items.total_amount의 합. 세금이나 회계적 순매출을 별도로 정의한 값이 아닙니다.",
+      "visible_customers": "실습의 고객 프로필 조회 정책을 적용한 기준값: 주요 매장이 해당 매장이거나, 해당 매장에 주문이 있는 고객의 합집합 크기. 고객별 중복은 제거합니다.",
+      "inventory_rows": "inventory의 행 수"
+    },
+    "customer_visibility_note": "visible_customers는 원본 데이터의 소유권 규칙이 아니라 실습에서 선택한 정책의 검증값입니다. 고객은 여러 매장에서 조회될 수 있어 매장별 합계가 전체 고객 수와 다릅니다. 프로필 조회가 다른 매장의 주문 접근 권한을 부여하지는 않습니다.",
+    "by_store": [
+      {
+        "store_id": "1",
+        "orders": 54995,
+        "order_items": 115247,
+        "quantity": 186511,
+        "total_amount": "12926498.11",
+        "visible_customers": 20340,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "2",
+        "orders": 36666,
+        "order_items": 76784,
+        "quantity": 123994,
+        "total_amount": "8541980.97",
+        "visible_customers": 17543,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "3",
+        "orders": 26064,
+        "order_items": 54582,
+        "quantity": 88521,
+        "total_amount": "6025446.22",
+        "visible_customers": 14072,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "4",
+        "orders": 9831,
+        "order_items": 20567,
+        "quantity": 33247,
+        "total_amount": "2274063.58",
+        "visible_customers": 5821,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "5",
+        "orders": 6492,
+        "order_items": 13722,
+        "quantity": 22094,
+        "total_amount": "1550325.41",
+        "visible_customers": 5246,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "6",
+        "orders": 5047,
+        "order_items": 10529,
+        "quantity": 17094,
+        "total_amount": "1148485.13",
+        "visible_customers": 4454,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "7",
+        "orders": 2975,
+        "order_items": 6223,
+        "quantity": 10051,
+        "total_amount": "691392.37",
+        "visible_customers": 3025,
+        "inventory_rows": 424
+      },
+      {
+        "store_id": "8",
+        "orders": 55595,
+        "order_items": 116587,
+        "quantity": 188839,
+        "total_amount": "13026455.73",
+        "visible_customers": 20450,
+        "inventory_rows": 424
+      }
+    ],
+    "integrity_checks": {
+      "duplicate_primary_keys": {
+        "stores": 0,
+        "categories": 0,
+        "product_types": 0,
+        "products": 0,
+        "customers": 0,
+        "orders": 0,
+        "order_items": 0,
+        "inventory": 0
+      },
+      "duplicate_product_skus": 0,
+      "duplicate_customer_emails": 0,
+      "product_types_missing_category": 0,
+      "products_missing_category": 0,
+      "products_category_type_disagreement": 0,
+      "customers_missing_primary_store": 0,
+      "orders_missing_customer": 0,
+      "orders_missing_store": 0,
+      "items_missing_order": 0,
+      "items_missing_product": 0,
+      "items_store_different_from_order": 0,
+      "inventory_missing_product": 0,
+      "inventory_missing_store": 0
+    },
+    "observations": {
+      "order_date_min": "2020-01-01",
+      "order_date_max": "2026-12-31",
+      "inventory_rows_per_store": 424,
+      "stock_level_min": 28,
+      "stock_level_max": 6625,
+      "zero_stock_rows": 0,
+      "customers_ordering_outside_primary_store": 40951,
+      "orders_outside_customer_primary_store": 158818,
+      "customers_with_orders_in_multiple_stores": 0,
+      "observed_relationship_note": "현재 고객별 주문이 한 매장에 모여 있다는 관찰은 향후 여러 매장에서 주문하지 못한다는 규칙이 아닙니다.",
+      "unit_price_different_from_current_base_price_rows": 413839,
+      "stored_amount_differences": {
+        "formula": "total_amount - (quantity * unit_price - discount_amount)",
+        "nonzero_rows": 105746,
+        "min": "-0.03",
+        "max": "0.03",
+        "counts": {
+          "-0.03": 37,
+          "-0.02": 3382,
+          "-0.01": 49393,
+          "0.01": 49505,
+          "0.02": 3399,
+          "0.03": 30
+        },
+        "interpretation": "원본의 계산 정밀도나 반올림 순서는 확정할 수 없습니다. 제공 금액을 재계산하거나 보정하지 않습니다."
+      }
+    }
+  }
+}

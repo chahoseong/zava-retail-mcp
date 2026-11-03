@@ -1,0 +1,9 @@
+store_id,store_name,rls_user_id,is_online
+1,Zava Retail Seattle,f47ac10b-58cc-4372-a567-0e02b2c3d479,f
+2,Zava Retail Bellevue,6ba7b810-9dad-11d1-80b4-00c04fd430c8,f
+3,Zava Retail Tacoma,a1b2c3d4-e5f6-7890-abcd-ef1234567890,f
+4,Zava Retail Spokane,d8e9f0a1-b2c3-4567-8901-234567890abc,f
+5,Zava Retail Everett,3b9ac9fa-cd5e-4b92-a7f2-b8c1d0e9f2a3,f
+6,Zava Retail Redmond,e7f8a9b0-c1d2-3e4f-5678-90abcdef1234,f
+7,Zava Retail Kirkland,9c8b7a65-4321-fed0-9876-543210fedcba,f
+8,Zava Retail Online,2f4e6d8c-1a3b-5c7e-9f0a-b2d4f6e8c0a2,t
