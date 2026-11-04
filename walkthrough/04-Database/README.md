@@ -1,1119 +1,534 @@
-# Database Design and Schema
-
-## 🎯 What This Lab Covers
-
-This lab dives deep into the PostgreSQL database design for the Zava Retail system. You'll learn to implement a comprehensive retail schema with vector search capabilities, multi-tenant data modeling, and Row Level Security (RLS) for data isolation.
-
-## Overview
-
-The database is the foundation of our MCP server, storing retail data across multiple stores while maintaining strict data isolation. We use PostgreSQL with the pgvector extension to enable semantic search capabilities, allowing customers to find products using natural language queries.
-
-Our schema follows modern multi-tenant patterns with Row Level Security ensuring users can only access data from their authorized stores. This approach provides enterprise-grade security while maintaining optimal performance.
-
-## Learning Objectives
-
-By the end of this lab, you will be able to:
-
-- **Design** scalable multi-tenant retail database schemas
-- **Implement** PostgreSQL with pgvector for vector search
-- **Configure** Row Level Security for data isolation
-- **Generate** realistic sample data for testing
-- **Optimize** database performance for retail workloads
-- **Implement** backup and recovery strategies
-
-## 🗃️ Database Architecture
-
-### PostgreSQL with pgvector
-
-Our database leverages PostgreSQL's enterprise features combined with the pgvector extension for AI-powered search:
-
-```sql
--- Enable required extensions
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-CREATE EXTENSION IF NOT EXISTS "vector";
-
--- Verify vector extension installation
-SELECT * FROM pg_extension WHERE extname = 'vector';
-```
-
-### Multi-Tenant Architecture
-
-The database uses a **shared database, shared schema** multi-tenancy model with Row Level Security:
-
-```
-┌─────────────────────────────────────────────────┐
-│                 PostgreSQL                      │
-├─────────────────────────────────────────────────┤
-│  retail Schema (Shared)                        │
-│  ├── stores (Master tenant data)               │
-│  ├── customers (RLS by store_id)               │
-│  ├── products (RLS by store_id)                │
-│  ├── sales_transactions (RLS by store_id)      │
-│  ├── sales_transaction_items (RLS via join)    │
-│  └── product_embeddings (RLS by store_id)      │
-└─────────────────────────────────────────────────┘
-```
-
-## 📊 Core Schema Design
-
-### Stores Table (Tenant Master)
-
-```sql
--- Stores table: Master tenant registry
-CREATE TABLE retail.stores (
-    store_id VARCHAR(50) PRIMARY KEY,
-    store_name VARCHAR(100) NOT NULL,
-    store_location VARCHAR(100),
-    store_type VARCHAR(50),
-    region VARCHAR(50),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    is_active BOOLEAN DEFAULT TRUE
-);
-
--- Sample stores data
-INSERT INTO retail.stores (store_id, store_name, store_location, store_type, region) VALUES
-('seattle', 'Zava Retail Seattle', 'Seattle, WA', 'flagship', 'west'),
-('redmond', 'Zava Retail Redmond', 'Redmond, WA', 'standard', 'west'),
-('bellevue', 'Zava Retail Bellevue', 'Bellevue, WA', 'standard', 'west'),
-('online', 'Zava Retail Online', 'Digital', 'ecommerce', 'global');
-
--- Create index for performance
-CREATE INDEX idx_stores_region ON retail.stores(region);
-CREATE INDEX idx_stores_active ON retail.stores(is_active) WHERE is_active = TRUE;
-```
-
-### Customers Table
-
-```sql
--- Customers table with RLS
-CREATE TABLE retail.customers (
-    customer_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    store_id VARCHAR(50) NOT NULL REFERENCES retail.stores(store_id),
-    first_name VARCHAR(50) NOT NULL,
-    last_name VARCHAR(50) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    phone VARCHAR(20),
-    date_of_birth DATE,
-    gender VARCHAR(20),
-    customer_since DATE DEFAULT CURRENT_DATE,
-    loyalty_tier VARCHAR(20) DEFAULT 'bronze',
-    total_lifetime_value DECIMAL(10,2) DEFAULT 0.00,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Enable RLS
-ALTER TABLE retail.customers ENABLE ROW LEVEL SECURITY;
-
--- RLS Policy: Users can only see customers from their store
-CREATE POLICY customers_store_isolation ON retail.customers
-    FOR ALL
-    TO mcp_user
-    USING (store_id = current_setting('app.current_store_id', true));
-
--- Indexes for performance
-CREATE INDEX idx_customers_store_id ON retail.customers(store_id);
-CREATE INDEX idx_customers_email ON retail.customers(email);
-CREATE INDEX idx_customers_loyalty_tier ON retail.customers(loyalty_tier);
-CREATE INDEX idx_customers_created_at ON retail.customers(created_at);
-```
-
-### Products Table with Categories
-
-```sql
--- Product categories
-CREATE TABLE retail.product_categories (
-    category_id SERIAL PRIMARY KEY,
-    category_name VARCHAR(100) NOT NULL UNIQUE,
-    parent_category_id INTEGER REFERENCES retail.product_categories(category_id),
-    description TEXT,
-    is_active BOOLEAN DEFAULT TRUE
-);
-
--- Insert sample categories
-INSERT INTO retail.product_categories (category_name, description) VALUES
-('Electronics', 'Electronic devices and accessories'),
-('Clothing', 'Apparel and fashion items'),
-('Home & Garden', 'Home improvement and garden supplies'),
-('Sports & Outdoors', 'Sports equipment and outdoor gear'),
-('Books & Media', 'Books, movies, and digital media'),
-('Health & Beauty', 'Health and beauty products'),
-('Automotive', 'Car parts and automotive accessories');
-
--- Products table with rich metadata
-CREATE TABLE retail.products (
-    product_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    store_id VARCHAR(50) NOT NULL REFERENCES retail.stores(store_id),
-    sku VARCHAR(50) NOT NULL,
-    product_name VARCHAR(200) NOT NULL,
-    product_description TEXT,
-    category_id INTEGER REFERENCES retail.product_categories(category_id),
-    brand VARCHAR(100),
-    model VARCHAR(100),
-    color VARCHAR(50),
-    size VARCHAR(50),
-    weight_kg DECIMAL(8,3),
-    dimensions_cm VARCHAR(50), -- e.g., "30x20x15"
-    price DECIMAL(10,2) NOT NULL,
-    cost DECIMAL(10,2),
-    current_stock INTEGER DEFAULT 0,
-    minimum_stock INTEGER DEFAULT 0,
-    maximum_stock INTEGER DEFAULT 1000,
-    reorder_point INTEGER DEFAULT 10,
-    supplier_name VARCHAR(100),
-    supplier_sku VARCHAR(50),
-    is_active BOOLEAN DEFAULT TRUE,
-    is_featured BOOLEAN DEFAULT FALSE,
-    rating_average DECIMAL(3,2) DEFAULT 0.00,
-    rating_count INTEGER DEFAULT 0,
-    tags TEXT[], -- Array of tags for flexible categorization
-    metadata JSONB, -- Flexible metadata storage
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Ensure SKU uniqueness within store
-    CONSTRAINT unique_sku_per_store UNIQUE (store_id, sku)
-);
-
--- Enable RLS for products
-ALTER TABLE retail.products ENABLE ROW LEVEL SECURITY;
-
--- RLS Policy for products
-CREATE POLICY products_store_isolation ON retail.products
-    FOR ALL
-    TO mcp_user
-    USING (store_id = current_setting('app.current_store_id', true));
-
--- Comprehensive indexes
-CREATE INDEX idx_products_store_id ON retail.products(store_id);
-CREATE INDEX idx_products_sku ON retail.products(sku);
-CREATE INDEX idx_products_category ON retail.products(category_id);
-CREATE INDEX idx_products_brand ON retail.products(brand);
-CREATE INDEX idx_products_price ON retail.products(price);
-CREATE INDEX idx_products_stock ON retail.products(current_stock);
-CREATE INDEX idx_products_active ON retail.products(is_active) WHERE is_active = TRUE;
-CREATE INDEX idx_products_featured ON retail.products(is_featured) WHERE is_featured = TRUE;
-CREATE INDEX idx_products_tags ON retail.products USING GIN(tags);
-CREATE INDEX idx_products_metadata ON retail.products USING GIN(metadata);
-CREATE INDEX idx_products_text_search ON retail.products USING GIN(
-    to_tsvector('english', product_name || ' ' || COALESCE(product_description, '') || ' ' || COALESCE(brand, ''))
-);
-```
-
-### Sales Transactions
-
-```sql
--- Sales transactions table
-CREATE TABLE retail.sales_transactions (
-    transaction_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    store_id VARCHAR(50) NOT NULL REFERENCES retail.stores(store_id),
-    customer_id UUID REFERENCES retail.customers(customer_id),
-    transaction_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    transaction_type VARCHAR(20) DEFAULT 'sale', -- 'sale', 'return', 'exchange'
-    payment_method VARCHAR(50), -- 'cash', 'credit_card', 'debit_card', 'digital_wallet'
-    subtotal DECIMAL(10,2) NOT NULL,
-    tax_amount DECIMAL(10,2) DEFAULT 0.00,
-    discount_amount DECIMAL(10,2) DEFAULT 0.00,
-    total_amount DECIMAL(10,2) NOT NULL,
-    cashier_id VARCHAR(50),
-    register_id VARCHAR(50),
-    receipt_number VARCHAR(50),
-    notes TEXT,
-    metadata JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Sales transaction items (line items)
-CREATE TABLE retail.sales_transaction_items (
-    item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    transaction_id UUID NOT NULL REFERENCES retail.sales_transactions(transaction_id) ON DELETE CASCADE,
-    product_id UUID NOT NULL REFERENCES retail.products(product_id),
-    quantity INTEGER NOT NULL DEFAULT 1,
-    unit_price DECIMAL(10,2) NOT NULL,
-    total_price DECIMAL(10,2) NOT NULL,
-    discount_amount DECIMAL(10,2) DEFAULT 0.00,
-    tax_amount DECIMAL(10,2) DEFAULT 0.00,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Ensure positive quantities and prices
-    CONSTRAINT positive_quantity CHECK (quantity > 0),
-    CONSTRAINT positive_unit_price CHECK (unit_price >= 0),
-    CONSTRAINT positive_total_price CHECK (total_price >= 0)
-);
-
--- Enable RLS for transactions
-ALTER TABLE retail.sales_transactions ENABLE ROW LEVEL SECURITY;
-
--- RLS Policy for sales transactions
-CREATE POLICY sales_transactions_store_isolation ON retail.sales_transactions
-    FOR ALL
-    TO mcp_user
-    USING (store_id = current_setting('app.current_store_id', true));
-
--- RLS for transaction items (via join with transactions)
-ALTER TABLE retail.sales_transaction_items ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY sales_transaction_items_store_isolation ON retail.sales_transaction_items
-    FOR ALL
-    TO mcp_user
-    USING (
-        transaction_id IN (
-            SELECT transaction_id 
-            FROM retail.sales_transactions 
-            WHERE store_id = current_setting('app.current_store_id', true)
-        )
-    );
-
--- Performance indexes
-CREATE INDEX idx_sales_transactions_store_id ON retail.sales_transactions(store_id);
-CREATE INDEX idx_sales_transactions_customer_id ON retail.sales_transactions(customer_id);
-CREATE INDEX idx_sales_transactions_date ON retail.sales_transactions(transaction_date);
-CREATE INDEX idx_sales_transactions_type ON retail.sales_transactions(transaction_type);
-CREATE INDEX idx_sales_transactions_payment ON retail.sales_transactions(payment_method);
-
-CREATE INDEX idx_sales_transaction_items_transaction_id ON retail.sales_transaction_items(transaction_id);
-CREATE INDEX idx_sales_transaction_items_product_id ON retail.sales_transaction_items(product_id);
-```
-
-## 🔍 Vector Search Implementation
-
-### Product Embeddings Table
-
-```sql
--- Product embeddings for semantic search
-CREATE TABLE retail.product_embeddings (
-    embedding_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    product_id UUID NOT NULL REFERENCES retail.products(product_id) ON DELETE CASCADE,
-    store_id VARCHAR(50) NOT NULL REFERENCES retail.stores(store_id),
-    embedding_text TEXT NOT NULL, -- The text that was embedded
-    embedding vector(1536), -- OpenAI text-embedding-3-small dimension
-    embedding_model VARCHAR(100) NOT NULL DEFAULT 'text-embedding-3-small',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Ensure one embedding per product per model
-    CONSTRAINT unique_product_embedding UNIQUE (product_id, embedding_model)
-);
-
--- Enable RLS for embeddings
-ALTER TABLE retail.product_embeddings ENABLE ROW LEVEL SECURITY;
-
--- RLS Policy for embeddings
-CREATE POLICY product_embeddings_store_isolation ON retail.product_embeddings
-    FOR ALL
-    TO mcp_user
-    USING (store_id = current_setting('app.current_store_id', true));
-
--- Vector similarity index (HNSW for fast approximate search)
-CREATE INDEX idx_product_embeddings_vector ON retail.product_embeddings 
-USING hnsw (embedding vector_cosine_ops);
-
--- Additional indexes
-CREATE INDEX idx_product_embeddings_product_id ON retail.product_embeddings(product_id);
-CREATE INDEX idx_product_embeddings_store_id ON retail.product_embeddings(store_id);
-CREATE INDEX idx_product_embeddings_model ON retail.product_embeddings(embedding_model);
-```
-
-### Vector Search Functions
-
-```sql
--- Function to search products by similarity
-CREATE OR REPLACE FUNCTION retail.search_products_by_similarity(
-    search_embedding vector(1536),
-    similarity_threshold float DEFAULT 0.7,
-    max_results integer DEFAULT 20
-)
-RETURNS TABLE (
-    product_id UUID,
-    product_name VARCHAR(200),
-    product_description TEXT,
-    brand VARCHAR(100),
-    price DECIMAL(10,2),
-    similarity_score float
-) 
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-    RETURN QUERY
-    SELECT 
-        p.product_id,
-        p.product_name,
-        p.product_description,
-        p.brand,
-        p.price,
-        1 - (pe.embedding <=> search_embedding) as similarity_score
-    FROM retail.product_embeddings pe
-    JOIN retail.products p ON pe.product_id = p.product_id
-    WHERE 
-        pe.store_id = current_setting('app.current_store_id', true)
-        AND p.is_active = TRUE
-        AND 1 - (pe.embedding <=> search_embedding) >= similarity_threshold
-    ORDER BY pe.embedding <=> search_embedding
-    LIMIT max_results;
-END;
-$$;
-
--- Grant execute permission
-GRANT EXECUTE ON FUNCTION retail.search_products_by_similarity TO mcp_user;
-```
-
-## 🔐 Row Level Security Setup
-
-### Database Roles and Permissions
-
-```sql
--- Create MCP application role
-CREATE ROLE mcp_user LOGIN;
-
--- Grant schema usage
-GRANT USAGE ON SCHEMA retail TO mcp_user;
-
--- Grant table permissions
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA retail TO mcp_user;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA retail TO mcp_user;
-
--- Grant permissions on future tables
-ALTER DEFAULT PRIVILEGES IN SCHEMA retail GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mcp_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA retail GRANT USAGE, SELECT ON SEQUENCES TO mcp_user;
-
--- Function to set store context
-CREATE OR REPLACE FUNCTION retail.set_store_context(store_id_param VARCHAR(50))
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-    -- Verify store exists and user has access
-    IF NOT EXISTS (SELECT 1 FROM retail.stores WHERE store_id = store_id_param AND is_active = TRUE) THEN
-        RAISE EXCEPTION 'Invalid or inactive store: %', store_id_param;
-    END IF;
-    
-    -- Set the store context
-    PERFORM set_config('app.current_store_id', store_id_param, false);
-    
-    -- Log the context change
-    INSERT INTO retail.audit_log (
-        table_name,
-        action,
-        user_name,
-        store_id,
-        metadata
-    ) VALUES (
-        'security_context',
-        'store_context_set',
-        current_user,
-        store_id_param,
-        jsonb_build_object('timestamp', current_timestamp)
-    );
-END;
-$$;
-
--- Grant execute permission
-GRANT EXECUTE ON FUNCTION retail.set_store_context TO mcp_user;
-```
-
-### Audit Logging
-
-```sql
--- Audit log table for security and compliance
-CREATE TABLE retail.audit_log (
-    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    table_name VARCHAR(100) NOT NULL,
-    action VARCHAR(50) NOT NULL, -- INSERT, UPDATE, DELETE, SELECT
-    user_name VARCHAR(100) NOT NULL DEFAULT current_user,
-    store_id VARCHAR(50),
-    record_id UUID,
-    old_values JSONB,
-    new_values JSONB,
-    metadata JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Index for audit queries
-CREATE INDEX idx_audit_log_table_name ON retail.audit_log(table_name);
-CREATE INDEX idx_audit_log_action ON retail.audit_log(action);
-CREATE INDEX idx_audit_log_user_name ON retail.audit_log(user_name);
-CREATE INDEX idx_audit_log_store_id ON retail.audit_log(store_id);
-CREATE INDEX idx_audit_log_created_at ON retail.audit_log(created_at);
-
--- Audit trigger function
-CREATE OR REPLACE FUNCTION retail.audit_trigger()
-RETURNS trigger AS $$
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        INSERT INTO retail.audit_log (
-            table_name,
-            action,
-            store_id,
-            record_id,
-            old_values
-        ) VALUES (
-            TG_TABLE_NAME,
-            TG_OP,
-            COALESCE(OLD.store_id, current_setting('app.current_store_id', true)),
-            COALESCE(OLD.customer_id, OLD.product_id, OLD.transaction_id),
-            row_to_json(OLD)
-        );
-        RETURN OLD;
-    ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO retail.audit_log (
-            table_name,
-            action,
-            store_id,
-            record_id,
-            old_values,
-            new_values
-        ) VALUES (
-            TG_TABLE_NAME,
-            TG_OP,
-            COALESCE(NEW.store_id, current_setting('app.current_store_id', true)),
-            COALESCE(NEW.customer_id, NEW.product_id, NEW.transaction_id),
-            row_to_json(OLD),
-            row_to_json(NEW)
-        );
-        RETURN NEW;
-    ELSIF TG_OP = 'INSERT' THEN
-        INSERT INTO retail.audit_log (
-            table_name,
-            action,
-            store_id,
-            record_id,
-            new_values
-        ) VALUES (
-            TG_TABLE_NAME,
-            TG_OP,
-            COALESCE(NEW.store_id, current_setting('app.current_store_id', true)),
-            COALESCE(NEW.customer_id, NEW.product_id, NEW.transaction_id),
-            row_to_json(NEW)
-        );
-        RETURN NEW;
-    END IF;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
--- Create audit triggers
-CREATE TRIGGER customers_audit_trigger
-    AFTER INSERT OR UPDATE OR DELETE ON retail.customers
-    FOR EACH ROW EXECUTE FUNCTION retail.audit_trigger();
-
-CREATE TRIGGER products_audit_trigger
-    AFTER INSERT OR UPDATE OR DELETE ON retail.products
-    FOR EACH ROW EXECUTE FUNCTION retail.audit_trigger();
-
-CREATE TRIGGER sales_transactions_audit_trigger
-    AFTER INSERT OR UPDATE OR DELETE ON retail.sales_transactions
-    FOR EACH ROW EXECUTE FUNCTION retail.audit_trigger();
-```
-
-## 📊 Sample Data Generation
-
-### Realistic Test Data Script
-
-```python
-# scripts/generate_sample_data.py
-"""
-Generate realistic sample data for the Zava Retail database.
-"""
-import asyncio
-import asyncpg
-import random
-import json
-from datetime import datetime, timedelta
-from faker import Faker
-from typing import List, Dict, Any
-import numpy as np
-
-fake = Faker()
-
-class SampleDataGenerator:
-    """Generate realistic retail sample data."""
-    
-    def __init__(self, connection_string: str):
-        self.connection_string = connection_string
-        self.stores = ['seattle', 'redmond', 'bellevue', 'online']
-        
-        # Product categories with realistic items
-        self.product_data = {
-            'Electronics': {
-                'brands': ['Apple', 'Samsung', 'Sony', 'LG', 'HP', 'Dell'],
-                'items': [
-                    'Smartphone', 'Laptop', 'Tablet', 'Headphones', 'Smart TV',
-                    'Gaming Console', 'Smartwatch', 'Bluetooth Speaker'
-                ]
-            },
-            'Clothing': {
-                'brands': ['Nike', 'Adidas', 'Zara', 'H&M', 'Levi\'s', 'Gap'],
-                'items': [
-                    'T-Shirt', 'Jeans', 'Dress', 'Jacket', 'Sneakers',
-                    'Sweater', 'Shorts', 'Blouse'
-                ]
-            },
-            'Home & Garden': {
-                'brands': ['IKEA', 'Home Depot', 'Wayfair', 'Target', 'Walmart'],
-                'items': [
-                    'Sofa', 'Dining Table', 'Lamp', 'Garden Tool', 'Plant Pot',
-                    'Curtains', 'Rug', 'Kitchen Appliance'
-                ]
-            }
-        }
-    
-    async def generate_all_data(self):
-        """Generate complete sample dataset."""
-        
-        conn = await asyncpg.connect(self.connection_string)
-        
-        try:
-            print("🏪 Generating stores data...")
-            await self._ensure_stores_exist(conn)
-            
-            print("👥 Generating customers...")
-            customers = await self._generate_customers(conn, 2000)
-            
-            print("📦 Generating products...")
-            products = await self._generate_products(conn, 500)
-            
-            print("🛒 Generating sales transactions...")
-            await self._generate_sales_transactions(conn, customers, products, 5000)
-            
-            print("✅ Sample data generation complete!")
-            
-        finally:
-            await conn.close()
-    
-    async def _ensure_stores_exist(self, conn):
-        """Ensure all stores exist in the database."""
-        
-        stores_data = [
-            ('seattle', 'Zava Retail Seattle', 'Seattle, WA', 'flagship', 'west'),
-            ('redmond', 'Zava Retail Redmond', 'Redmond, WA', 'standard', 'west'),
-            ('bellevue', 'Zava Retail Bellevue', 'Bellevue, WA', 'standard', 'west'),
-            ('online', 'Zava Retail Online', 'Digital', 'ecommerce', 'global')
-        ]
-        
-        for store_data in stores_data:
-            await conn.execute("""
-                INSERT INTO retail.stores (store_id, store_name, store_location, store_type, region)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (store_id) DO NOTHING
-            """, *store_data)
-    
-    async def _generate_customers(self, conn, count: int) -> List[Dict]:
-        """Generate realistic customer data."""
-        
-        customers = []
-        
-        for _ in range(count):
-            store_id = random.choice(self.stores)
-            customer_data = {
-                'store_id': store_id,
-                'first_name': fake.first_name(),
-                'last_name': fake.last_name(),
-                'email': fake.unique.email(),
-                'phone': fake.phone_number()[:20],
-                'date_of_birth': fake.date_of_birth(minimum_age=18, maximum_age=80),
-                'gender': random.choice(['Male', 'Female', 'Other', 'Prefer not to say']),
-                'customer_since': fake.date_between(start_date='-5y', end_date='today'),
-                'loyalty_tier': random.choices(
-                    ['bronze', 'silver', 'gold', 'platinum'],
-                    weights=[50, 30, 15, 5]
-                )[0]
-            }
-            
-            customer_id = await conn.fetchval("""
-                INSERT INTO retail.customers (
-                    store_id, first_name, last_name, email, phone,
-                    date_of_birth, gender, customer_since, loyalty_tier
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING customer_id
-            """, *customer_data.values())
-            
-            customer_data['customer_id'] = customer_id
-            customers.append(customer_data)
-        
-        return customers
-    
-    async def _generate_products(self, conn, count: int) -> List[Dict]:
-        """Generate realistic product data."""
-        
-        # Get category IDs
-        categories = await conn.fetch("SELECT category_id, category_name FROM retail.product_categories")
-        category_map = {cat['category_name']: cat['category_id'] for cat in categories}
-        
-        products = []
-        
-        for _ in range(count):
-            store_id = random.choice(self.stores)
-            category_name = random.choice(list(self.product_data.keys()))
-            category_id = category_map.get(category_name)
-            
-            if not category_id:
-                continue
-            
-            brand = random.choice(self.product_data[category_name]['brands'])
-            item_type = random.choice(self.product_data[category_name]['items'])
-            
-            # Generate realistic pricing
-            base_price = random.uniform(10, 1000)
-            cost = base_price * random.uniform(0.4, 0.7)  # 40-70% cost margin
-            
-            product_data = {
-                'store_id': store_id,
-                'sku': f"{brand[:3].upper()}-{fake.unique.random_number(digits=6)}",
-                'product_name': f"{brand} {item_type}",
-                'product_description': fake.text(max_nb_chars=500),
-                'category_id': category_id,
-                'brand': brand,
-                'model': f"Model {fake.random_number(digits=4)}",
-                'color': fake.color_name(),
-                'size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL', 'One Size']),
-                'weight_kg': round(random.uniform(0.1, 10.0), 2),
-                'price': round(base_price, 2),
-                'cost': round(cost, 2),
-                'current_stock': random.randint(0, 100),
-                'minimum_stock': random.randint(5, 20),
-                'reorder_point': random.randint(10, 30),
-                'supplier_name': fake.company(),
-                'is_featured': random.choice([True, False]),
-                'rating_average': round(random.uniform(3.0, 5.0), 2),
-                'rating_count': random.randint(0, 500),
-                'tags': random.sample([
-                    'popular', 'new', 'sale', 'limited', 'bestseller', 
-                    'eco-friendly', 'premium', 'budget'
-                ], k=random.randint(1, 3))
-            }
-            
-            product_id = await conn.fetchval("""
-                INSERT INTO retail.products (
-                    store_id, sku, product_name, product_description, category_id,
-                    brand, model, color, size, weight_kg, price, cost,
-                    current_stock, minimum_stock, reorder_point, supplier_name,
-                    is_featured, rating_average, rating_count, tags
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-                RETURNING product_id
-            """, *product_data.values())
-            
-            product_data['product_id'] = product_id
-            products.append(product_data)
-        
-        return products
-    
-    async def _generate_sales_transactions(self, conn, customers: List[Dict], products: List[Dict], count: int):
-        """Generate realistic sales transaction data."""
-        
-        for _ in range(count):
-            # Select customer and matching store products
-            customer = random.choice(customers)
-            store_products = [p for p in products if p['store_id'] == customer['store_id']]
-            
-            if not store_products:
-                continue
-            
-            # Generate transaction basics
-            transaction_date = fake.date_time_between(start_date='-1y', end_date='now')
-            transaction_type = random.choices(
-                ['sale', 'return', 'exchange'],
-                weights=[90, 7, 3]
-            )[0]
-            
-            payment_method = random.choices(
-                ['credit_card', 'debit_card', 'cash', 'digital_wallet'],
-                weights=[45, 25, 20, 10]
-            )[0]
-            
-            # Generate transaction items (1-5 items per transaction)
-            num_items = random.choices([1, 2, 3, 4, 5], weights=[40, 30, 20, 7, 3])[0]
-            selected_products = random.sample(store_products, min(num_items, len(store_products)))
-            
-            subtotal = 0
-            transaction_items = []
-            
-            for product in selected_products:
-                quantity = random.randint(1, 3)
-                unit_price = product['price']
-                
-                # Apply random discounts occasionally
-                discount_amount = 0
-                if random.random() < 0.2:  # 20% chance of discount
-                    discount_amount = unit_price * quantity * random.uniform(0.05, 0.25)
-                
-                total_price = (unit_price * quantity) - discount_amount
-                subtotal += total_price
-                
-                transaction_items.append({
-                    'product_id': product['product_id'],
-                    'quantity': quantity,
-                    'unit_price': unit_price,
-                    'total_price': total_price,
-                    'discount_amount': discount_amount
-                })
-            
-            # Calculate totals
-            discount_amount = sum(item['discount_amount'] for item in transaction_items)
-            tax_amount = subtotal * 0.08  # 8% tax rate
-            total_amount = subtotal + tax_amount
-            
-            # Insert transaction
-            transaction_id = await conn.fetchval("""
-                INSERT INTO retail.sales_transactions (
-                    store_id, customer_id, transaction_date, transaction_type,
-                    payment_method, subtotal, tax_amount, discount_amount, total_amount,
-                    cashier_id, register_id, receipt_number
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                RETURNING transaction_id
-            """, 
-                customer['store_id'], customer['customer_id'], transaction_date,
-                transaction_type, payment_method, subtotal, tax_amount,
-                discount_amount, total_amount, f"CASHIER{random.randint(1, 10)}",
-                f"REG{random.randint(1, 5)}", f"RCP{fake.random_number(digits=8)}"
-            )
-            
-            # Insert transaction items
-            for item in transaction_items:
-                await conn.execute("""
-                    INSERT INTO retail.sales_transaction_items (
-                        transaction_id, product_id, quantity, unit_price,
-                        total_price, discount_amount
-                    ) VALUES ($1, $2, $3, $4, $5, $6)
-                """, 
-                    transaction_id, item['product_id'], item['quantity'],
-                    item['unit_price'], item['total_price'], item['discount_amount']
-                )
-
-# Usage example
-if __name__ == "__main__":
-    import os
-    from config import Config
-    
-    config = Config()
-    generator = SampleDataGenerator(config.database.connection_string)
-    
-    asyncio.run(generator.generate_all_data())
-```
-
-## 🚀 Performance Optimization
-
-### Database Configuration
-
-```sql
--- Performance-oriented PostgreSQL settings
--- Add to postgresql.conf
-
-# Memory settings
-shared_buffers = '256MB'                # 25% of RAM for dedicated DB server
-effective_cache_size = '1GB'           # Estimate of OS cache size
-work_mem = '4MB'                       # Memory for sorts and hash joins
-maintenance_work_mem = '64MB'          # Memory for VACUUM, CREATE INDEX
-
-# Connection settings
-max_connections = 100                  # Adjust based on application needs
-
-# Write-ahead logging
-wal_buffers = '16MB'
-checkpoint_segments = 32               # PostgreSQL < 9.5
-max_wal_size = '1GB'                   # PostgreSQL >= 9.5
-
-# Query planner
-random_page_cost = 1.1                 # SSD-optimized
-effective_io_concurrency = 200         # SSD concurrent I/O capability
-
-# Logging for performance monitoring
-log_min_duration_statement = 1000      # Log queries > 1 second
-log_checkpoints = on
-log_connections = on
-log_disconnections = on
-log_line_prefix = '%t [%p-%l] %q%u@%d '
-```
-
-### Query Optimization Views
-
-```sql
--- Create monitoring views for query performance
-CREATE VIEW retail.slow_queries AS
-SELECT 
-    query,
-    calls,
-    total_exec_time,
-    mean_exec_time,
-    max_exec_time,
-    stddev_exec_time,
-    rows,
-    100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent
-FROM pg_stat_statements
-WHERE mean_exec_time > 100  -- Queries taking more than 100ms on average
-ORDER BY mean_exec_time DESC;
-
--- Table sizes and index usage
-CREATE VIEW retail.table_stats AS
-SELECT
-    schemaname,
-    tablename,
-    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as size,
-    pg_stat_get_tuples_inserted(c.oid) as inserts,
-    pg_stat_get_tuples_updated(c.oid) as updates,
-    pg_stat_get_tuples_deleted(c.oid) as deletes,
-    pg_stat_get_live_tuples(c.oid) as live_tuples,
-    pg_stat_get_dead_tuples(c.oid) as dead_tuples
-FROM pg_tables pt
-JOIN pg_class c ON c.relname = pt.tablename
-WHERE schemaname = 'retail'
-ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
-
--- Index usage statistics
-CREATE VIEW retail.index_usage AS
-SELECT
-    schemaname,
-    tablename,
-    indexname,
-    idx_tup_read,
-    idx_tup_fetch,
-    pg_size_pretty(pg_relation_size(indexrelname)) as size
-FROM pg_stat_user_indexes
-WHERE schemaname = 'retail'
-ORDER BY idx_tup_read DESC;
-```
-
-### Automated Maintenance
-
-```sql
--- Create function for automated maintenance
-CREATE OR REPLACE FUNCTION retail.perform_maintenance()
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    -- Update table statistics
-    ANALYZE retail.customers;
-    ANALYZE retail.products;
-    ANALYZE retail.sales_transactions;
-    ANALYZE retail.sales_transaction_items;
-    ANALYZE retail.product_embeddings;
-    
-    -- Vacuum tables with high update/delete activity
-    VACUUM (ANALYZE, VERBOSE) retail.customers;
-    VACUUM (ANALYZE, VERBOSE) retail.products;
-    
-    -- Reindex if needed (check for index bloat)
-    REINDEX INDEX CONCURRENTLY idx_products_text_search;
-    REINDEX INDEX CONCURRENTLY idx_product_embeddings_vector;
-    
-    -- Log maintenance completion
-    INSERT INTO retail.audit_log (
-        table_name,
-        action,
-        metadata
-    ) VALUES (
-        'maintenance',
-        'automated_maintenance_completed',
-        jsonb_build_object(
-            'timestamp', current_timestamp,
-            'database_size', pg_database_size(current_database())
-        )
-    );
-END;
-$$;
-
--- Schedule maintenance (would typically be done via cron or scheduled job)
--- Example cron entry: 0 2 * * 0 psql -d retail_db -c "SELECT retail.perform_maintenance();"
-```
-
-## 💾 Backup and Recovery
-
-### Backup Strategy
-
-```bash
-#!/bin/bash
-# scripts/backup_database.sh
-
-# Comprehensive backup script for production environments
-
-set -e
-
-# Configuration
-DB_HOST="${POSTGRES_HOST:-localhost}"
-DB_PORT="${POSTGRES_PORT:-5432}"
-DB_NAME="${POSTGRES_DB:-retail_db}"
-DB_USER="${POSTGRES_USER:-postgres}"
-BACKUP_DIR="/backups/postgresql"
-RETENTION_DAYS=30
-
-# Create backup directory
-mkdir -p "$BACKUP_DIR"
-
-# Generate backup filename with timestamp
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="$BACKUP_DIR/retail_backup_$TIMESTAMP.sql"
-COMPRESSED_BACKUP="$BACKUP_FILE.gz"
-
-echo "Starting database backup: $TIMESTAMP"
-
-# Create comprehensive backup
-pg_dump \
-    --host="$DB_HOST" \
-    --port="$DB_PORT" \
-    --username="$DB_USER" \
-    --dbname="$DB_NAME" \
-    --verbose \
-    --clean \
-    --create \
-    --if-exists \
-    --format=custom \
-    --file="$BACKUP_FILE"
-
-# Compress backup
-gzip "$BACKUP_FILE"
-
-# Verify backup integrity
-echo "Verifying backup integrity..."
-pg_restore --list "$COMPRESSED_BACKUP" > /dev/null
-
-# Clean up old backups
-find "$BACKUP_DIR" -name "retail_backup_*.sql.gz" -mtime +$RETENTION_DAYS -delete
-
-# Calculate backup size
-BACKUP_SIZE=$(du -h "$COMPRESSED_BACKUP" | cut -f1)
-
-echo "Backup completed successfully:"
-echo "  File: $COMPRESSED_BACKUP"
-echo "  Size: $BACKUP_SIZE"
-echo "  Timestamp: $TIMESTAMP"
-
-# Optional: Upload to cloud storage
-if [ -n "$AZURE_STORAGE_ACCOUNT" ] && [ -n "$AZURE_STORAGE_KEY" ]; then
-    echo "Uploading backup to Azure Storage..."
-    az storage blob upload \
-        --account-name "$AZURE_STORAGE_ACCOUNT" \
-        --account-key "$AZURE_STORAGE_KEY" \
-        --container-name "database-backups" \
-        --name "retail_backup_$TIMESTAMP.sql.gz" \
-        --file "$COMPRESSED_BACKUP"
-fi
-```
-
-### Recovery Procedures
-
-```bash
-#!/bin/bash
-# scripts/restore_database.sh
-
-# Database restoration script
-
-set -e
-
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 <backup_file> [target_database]"
-    echo "Example: $0 /backups/retail_backup_20241001_120000.sql.gz retail_db_restored"
-    exit 1
-fi
-
-BACKUP_FILE="$1"
-TARGET_DB="${2:-retail_db_restored}"
-
-# Configuration
-DB_HOST="${POSTGRES_HOST:-localhost}"
-DB_PORT="${POSTGRES_PORT:-5432}"
-DB_USER="${POSTGRES_USER:-postgres}"
-
-echo "Starting database restoration..."
-echo "  Source: $BACKUP_FILE"
-echo "  Target: $TARGET_DB"
-
-# Verify backup file exists
-if [ ! -f "$BACKUP_FILE" ]; then
-    echo "Error: Backup file not found: $BACKUP_FILE"
-    exit 1
-fi
-
-# Create target database
-createdb \
-    --host="$DB_HOST" \
-    --port="$DB_PORT" \
-    --username="$DB_USER" \
-    --owner="$DB_USER" \
-    "$TARGET_DB"
-
-# Restore from backup
-if [[ "$BACKUP_FILE" == *.gz ]]; then
-    # Compressed backup
-    gunzip -c "$BACKUP_FILE" | pg_restore \
-        --host="$DB_HOST" \
-        --port="$DB_PORT" \
-        --username="$DB_USER" \
-        --dbname="$TARGET_DB" \
-        --verbose \
-        --clean \
-        --if-exists
-else
-    # Uncompressed backup
-    pg_restore \
-        --host="$DB_HOST" \
-        --port="$DB_PORT" \
-        --username="$DB_USER" \
-        --dbname="$TARGET_DB" \
-        --verbose \
-        --clean \
-        --if-exists \
-        "$BACKUP_FILE"
-fi
-
-echo "Database restoration completed successfully!"
-echo "Restored database: $TARGET_DB"
-
-# Verify restoration
-echo "Verifying restoration..."
-TABLES_COUNT=$(psql \
-    --host="$DB_HOST" \
-    --port="$DB_PORT" \
-    --username="$DB_USER" \
-    --dbname="$TARGET_DB" \
-    --tuples-only \
-    --command="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'retail';"
-)
-
-echo "Verified $TABLES_COUNT tables in retail schema"
-```
-
-## 🎯 Key Takeaways
-
-After completing this lab, you should have:
-
-✅ **Multi-Tenant Database Design**: Implemented Row Level Security for secure data isolation  
-✅ **Vector Search Capabilities**: Configured pgvector for semantic product search  
-✅ **Comprehensive Schema**: Created production-ready retail database schema  
-✅ **Sample Data Generation**: Built realistic test data for development and testing  
-✅ **Performance Optimization**: Configured indexes and query optimization  
-✅ **Backup and Recovery**: Established robust data protection strategies  
-
-## 🚀 What's Next
-
-Continue with **[Lab 05: MCP Server Implementation](../05-MCP-Server/README.md)** to:
-
-- Build the FastMCP server that connects to this database
-- Implement database query tools for the MCP protocol
-- Add semantic search capabilities using the embeddings
-- Configure connection pooling and error handling
-
-## 📚 Additional Resources
-
-### PostgreSQL & pgvector
-- [PostgreSQL Documentation](https://www.postgresql.org/docs/) - Complete PostgreSQL reference
-- [pgvector Extension](https://github.com/pgvector/pgvector) - Vector similarity search for PostgreSQL
-- [PostgreSQL Performance Tuning](https://wiki.postgresql.org/wiki/Performance_Optimization) - Optimization best practices
-
-### Multi-Tenant Architecture
-- [Row Level Security](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) - PostgreSQL RLS documentation
-- [Multi-Tenant Data Architecture](https://docs.microsoft.com/azure/architecture/patterns/multitenancy) - Azure architecture patterns
-- [Database Security Best Practices](https://www.postgresql.org/docs/current/security.html) - PostgreSQL security guide
-
-### Vector Databases
-- [Vector Search Fundamentals](https://www.pinecone.io/learn/vector-database/) - Understanding vector databases
-- [Embedding Models](https://platform.openai.com/docs/guides/embeddings) - OpenAI embeddings documentation
-- [HNSW Algorithm](https://arxiv.org/abs/1603.09320) - Hierarchical Navigable Small World graphs
-
----
-
-**Previous**: [Lab 03: Environment Setup](../03-Setup/README.md)  
-**Next**: [Lab 05: MCP Server Implementation](../05-MCP-Server/README.md)
+# 데이터베이스 설계와 구축
+
+매출 분석 도구가 올바른 결과를 반환하려면 거래 내역을 정확히 연결해야 하고, 매장별 데이터 격리(Data Isolation)가 작동하려면 데이터의 소속과 접근 정책이 일치해야 합니다. 이 실습에서는 제공된 리테일 데이터로 테이블을 직접 설계하고 생성한 뒤, 데이터를 적재하고 서버 조회용 DB 계정(Service Account)의 접근 범위를 검증합니다.
+
+[실습 01](../01-Architecture/README.md)의 계층별 책임과 [실습 02](../02-Security/README.md)의 보안 원칙을 데이터베이스의 키(Key), 제약조건(Constraints), 권한(Privileges), 행 수준 보안(RLS)으로 구체화합니다. 여기서 구축한 데이터베이스는 이후 MCP 서버의 매출 분석 도구와 시맨틱 검색(Semantic Search)에 활용됩니다.
+
+## 학습 목표
+
+- 공용 상품, 매장별 주문·재고, 매장과의 관계에 따라 접근을 허용하는 고객 정보를 구분합니다.
+- 서버 기능에 필요한 테이블, 데이터 타입(Data Type), 키와 제약조건을 선택하고 구현합니다.
+- 원본 식별자와 금액을 보존하여 데이터를 적재하고 무결성을 확인합니다.
+- 관리 및 적재용 계정과 서버 조회용 계정의 권한을 분리합니다.
+- 매장 ID를 해당 트랜잭션(Transaction)에서만 유효하도록 설정하고, 이를 사용하는 RLS 정책을 구현합니다.
+- 실제 데이터로 조회·집계·접근 제한을 검증하고, 왜 그 결과가 나왔는지 설명합니다.
+
+## 준비 사항과 실습 자료
+
+### 실습 환경
+
+[실습 03](../03-Setup/README.md)의 프로젝트 Python 환경과 PostgreSQL 연결이 준비되어 있어야 합니다. 같은 `zava-retail-mcp` 프로젝트에서 이어서 작업하며, 버전은 [소개 문서](../00-Introduction/README.md)의 기술 스택을 따릅니다.
+
+### 제공 데이터와 실습 범위
+
+[데이터 설명서](../../data/README.md)와 [CSV 디렉터리](../../data/source/)를 통해 업무 데이터 8종을 제공합니다. 매장 8개, 상품 424개, 고객 50,000명, 주문 197,665건과 그 상세·재고·분류 데이터가 포함되어 있습니다.
+
+- **제공 내용**: 업무 데이터 CSV와 데이터 설명서를 제공합니다.
+- **이번 실습 범위**: 업무 테이블 8개 설계·생성, 데이터 적재, DB 계정과 권한·RLS 구성 및 검증을 진행합니다.
+- **이후 단계 연계**: 임베딩 테이블 구축과 로컬 모델 기반 벡터 생성·시맨틱 검색은 [실습 07](../07-Semantic-Search/README.md)에서 다룹니다.
+
+> [!IMPORTANT]
+> **데이터 취급 시 유의사항**
+>
+> - **주문일 보존**: 주문일은 2020-01-01~2026-12-31입니다. 실행 시점을 기준으로 미래 날짜가 있더라도 임의로 삭제하지 않습니다.
+> - **고객 정보 보호**: 이름·이메일·전화번호 등 개인 식별 정보(Personally Identifiable Information, PII)의 원문을 일반 로그나 검증 보고서에 출력하지 않습니다.
+
+## 1. 업무 데이터와 테이블 설계 이해하기
+
+매장별 재고와 매출을 조회하려면 상품·고객·주문 정보를 정확히 구분하고 연결해야 합니다. 상품 정보와 재고를 왜 나누는지, 주문 하나에 여러 상품을 어떻게 담는지 살펴보면서 테이블 설계에 필요한 개념을 익힙니다.
+
+아래 표는 설명을 위해 만든 **가상 데이터**이며, 필요한 열만 표시했습니다. 제공 CSV에서 발췌한 데이터가 아닙니다. 실제 파일의 열과 값 형식은 [데이터 설명서](../../data/README.md)에서 확인할 수 있습니다.
+
+### 테이블에 정보를 담는 방법
+
+상품을 관리하려면 상품명·기본 가격처럼 같은 종류의 정보를 여러 상품에 대해 저장해야 합니다. 데이터베이스에서 정보를 표 형태로 저장하는 단위를 **테이블(Table)**이라고 합니다. 이 프로젝트에서는 상품 정보를 `products` 테이블에 저장합니다.
+
+| `product_id` | `product_name` | `base_price` |
+| ---: | :--- | ---: |
+| 101 | 머그컵 | 12.00 |
+| 102 | 머그컵 | 18.00 |
+
+테이블의 **행(Row)** 하나는 상품 하나의 정보를 나타냅니다. 첫 번째 데이터 행은 ID가 101인 상품에 대한 정보입니다. **열(Column)**은 각 상품에 대해 저장하는 속성입니다. `product_name` 열에는 상품명이, `base_price` 열에는 기본 가격이 들어갑니다.
+
+상품명과 기본 가격을 한 행에 함께 저장하면 어떤 상품의 가격인지 알 수 있습니다. 상품과 고객처럼 서로 다른 대상을 표현하는 정보는 각각 `products`와 `customers` 테이블에 나누어 저장합니다.
+
+### 기본 키로 각 행 구별하기
+
+위 표에는 이름이 같은 머그컵이 두 개 있습니다. 상품명이 같더라도 서로 다른 상품일 수 있으므로, 이름만으로 특정 상품을 가리키기는 어렵습니다. `product_id`가 101인지 102인지 알면 두 상품을 구별할 수 있습니다.
+
+이처럼 각 행을 구별하도록 지정한 열 또는 열의 조합을 **기본 키(Primary Key, PK)**라고 합니다. `products`에서는 `product_id`를 기본 키로 사용합니다. `product_id`는 상품을 구별하는 식별자(ID)이며, 기본 키로 지정하면 데이터베이스가 다음 규칙을 검사합니다.
+
+- **값이 중복되어서는 안 됩니다.** `product_id`가 101인 행을 두 개 허용하면 어느 상품을 가리키는지 구별할 수 없습니다.
+- **NULL을 허용하지 않습니다.** NULL은 값이 없는 상태를 나타냅니다. 기본 키 값이 없으면 그 값으로 해당 상품을 가리킬 수 없습니다. NULL은 숫자 0이나 빈 문자열과는 다릅니다.
+
+열 이름에 `id`를 붙였다고 이런 규칙이 자동으로 적용되는 것은 아닙니다. 데이터베이스에서 기본 키로 지정해야 기본 키의 규칙을 적용할 수 있습니다.
+
+상품명을 변경하더라도 같은 `product_id`로 상품을 식별할 수 있습니다. 주문이나 재고에서도 이 식별자를 사용하면 상품명에 의존하지 않고 해당 상품과 연결할 수 있습니다.
+
+### 외래 키로 테이블 연결하기
+
+같은 고객이 주문할 때마다 이름과 이메일을 주문에 복사하면, 고객 정보가 바뀔 때 여러 주문에 저장된 값을 관리해야 합니다. 이 프로젝트에서는 고객 정보를 `customers`에 저장하고, `orders`에는 주문 고객의 ID를 저장합니다.
+
+다음 예시에서는 고객 ID가 201인 고객이 등록되어 있고, 이 고객이 주문 두 건을 만들었습니다.
+
+| `order_id` | `customer_id` | `store_id` |
+| ---: | ---: | ---: |
+| 9001 | 201 | 1 |
+| 9002 | 201 | 1 |
+
+`orders.customer_id`가 `customers.customer_id`를 참조하도록 지정하면, 데이터베이스는 주문에 저장한 고객 ID가 고객 테이블에 존재하는지 검사할 수 있습니다. 이렇게 참조 대상의 키와 연결되는 열 또는 열의 조합을 **외래 키(Foreign Key, FK)**라고 합니다.
+
+예를 들어 등록되지 않은 고객 ID 9999를 주문에 넣으려고 하면 외래 키 규칙에 따라 거부됩니다. 반면 고객 201이 여러 번 주문하는 것은 정상입니다. `orders`에서 각 주문을 구별하는 기본 키는 `order_id`이고, `customer_id`는 여러 행에 반복될 수 있습니다.
+
+외래 키를 지정하는 것만으로 값의 입력까지 필수가 되는 것은 아닙니다. `orders.customer_id`에 NULL을 허용하면 고객을 지정하지 않은 주문도 저장할 수 있습니다. 이 프로젝트에서는 모든 주문에 고객이 필요하므로 NULL도 금지합니다. **참조하는 고객이 존재해야 한다는 규칙과, 고객을 반드시 지정해야 한다는 규칙은 별개**입니다.
+
+고객 정보와 주문 이력을 함께 조회할 때는 두 테이블에서 `customer_id`가 같은 행을 연결합니다. 외래 키는 이 연결에 사용할 고객이 실제로 존재하도록 관계를 보호합니다.
+
+### 공용 상품과 매장별 재고 나누기
+
+상품명과 설명은 여러 매장에서 공유하지만 재고 수량은 매장마다 다릅니다. 매장마다 상품 설명을 복사하면 같은 상품의 설명을 여러 곳에서 관리해야 합니다. 따라서 `products`에는 공용 상품 정보를, `inventory`에는 매장별 상품과 수량을 저장합니다.
+
+| `store_id` | `product_id` | `stock_level` |
+| ---: | ---: | ---: |
+| 1 | 101 | 10 |
+| 2 | 101 | 4 |
+| 1 | 102 | 7 |
+
+상품 101은 매장 1과 매장 2에 모두 있습니다. 따라서 `product_id` 하나로는 재고 행을 구별할 수 없습니다. `store_id` 하나도 같은 매장의 여러 상품에 반복됩니다. 두 값을 함께 사용해야 “어느 매장의 어떤 상품 재고인지”를 구별할 수 있습니다.
+
+`inventory`에서는 `(store_id, product_id)`를 **복합 기본 키(Composite Primary Key)**로 사용합니다. 여러 열을 함께 사용하여 하나의 기본 키를 구성한다는 뜻입니다. `(1, 101)`과 `(2, 101)`은 서로 다른 조합이므로 함께 저장할 수 있지만, `(1, 101)`을 두 행에 중복 저장할 수는 없습니다. 기본 키를 구성하는 `store_id`와 `product_id`에는 각각 NULL도 허용하지 않습니다.
+
+두 열은 외래 키 역할도 합니다. `store_id`는 `stores`의 매장을, `product_id`는 `products`의 상품을 참조합니다. 이를 통해 존재하지 않는 매장이나 상품의 재고를 저장하지 못하게 합니다.
+
+매장별 상품·재고 조회에서는 `inventory`에서 해당 매장의 행을 찾고 `products`의 상품 정보를 연결합니다. 위 예시에서 상품 101의 상품명은 같지만, 매장 1의 재고는 10개이고 매장 2의 재고는 4개입니다. 상품 정보의 공유와 재고를 조회할 매장의 선택을 구분해야 합니다.
+
+### 주문과 주문 상세 나누기
+
+주문 한 건에는 주문 고객·매장·주문일이 있고, 그 안에는 여러 상품이 들어갈 수 있습니다. 주문 9001에서 상품 101을 두 개, 상품 102를 한 개 구매했다고 가정해 보겠습니다.
+
+주문 전체에 공통인 고객·매장·주문일은 `orders`의 한 행에 저장합니다. 각 판매 품목의 상품·수량·주문 단가·할인·거래 금액은 `order_items`의 개별 행에 저장합니다. 아래 표는 할인이 없는 경우의 주문 상세 예시입니다.
+
+| `order_id` | `product_id` | `quantity` | `unit_price` | `total_amount` |
+| ---: | ---: | ---: | ---: | ---: |
+| 9001 | 101 | 2 | 12.00 | 24.00 |
+| 9001 | 102 | 1 | 18.00 | 18.00 |
+
+각 상세에는 상위 주문의 `order_id`를 저장합니다. 주문 고객과 주문일을 품목마다 반복해서 저장하는 대신, 같은 주문에 속한 상세들이 `orders`의 한 행을 함께 참조하는 구조입니다. 주문 전체의 정보를 한곳에서 관리하면 품목마다 서로 다른 주문일이나 고객을 저장하는 오류를 줄일 수 있습니다.
+
+이 프로젝트의 주문 상세에는 매장별 조회를 위한 `store_id`도 저장합니다. 이 값은 상위 주문의 매장 ID와 일치해야 합니다. 따라서 상세의 `(order_id, store_id)` 조합으로 해당 주문을 참조하도록 설계합니다.
+
+이처럼 주문 하나에 여러 상세 행이 연결될 수 있는 관계를 **일대다 관계(One-to-Many Relationship)**라고 합니다. 각 상세는 주문 하나를 참조합니다. “일대다”는 여러 상세가 연결될 수 있다는 뜻이며, 모든 주문에 반드시 여러 상세가 있어야 한다는 뜻은 아닙니다. 품목이 하나뿐인 주문도 같은 구조로 표현할 수 있습니다.
+
+주문 상세에 상품 ID뿐 아니라 단가도 저장하는 이유가 있습니다. `products.base_price`는 상품의 기본 가격이고, `order_items.unit_price`는 주문 시 적용된 **주문 단가**입니다. 상품 101의 기본 가격이 나중에 12.00에서 15.00으로 바뀌어도, 주문 9001의 주문 단가는 12.00으로 남아야 합니다.
+
+따라서 과거 거래를 현재 상품 가격으로 다시 계산하지 않습니다. 주문 단가·할인 금액·거래 금액을 구분하여 보존하고, 매출 분석에서는 주문 상세의 `total_amount`에 저장된 금액을 합산합니다.
+
+이 구조는 집계 방법에도 영향을 줍니다. 위 예시의 주문은 **1건**, 상세는 **2행**, 판매 수량은 **3개**, 거래 금액 합계는 **42.00**입니다. 주문과 상세를 연결한 결과의 행 수를 그대로 주문 건수로 세면 주문을 중복 계산하게 됩니다. 매출 분석 도구에서는 무엇을 세거나 합산하는지 먼저 구분해야 합니다.
+
+### 고객의 주요 매장과 주문 매장 구분하기
+
+고객 201의 주요 매장이 매장 2이더라도 매장 1에서 주문할 수 있습니다. 고객의 주요 매장은 `customers.primary_store_id`에, 실제 주문 매장은 `orders.store_id`에 저장합니다.
+
+두 열은 모두 `stores.store_id`를 참조하지만 서로 다른 관계를 나타냅니다. `primary_store_id`는 고객의 주요 매장을, 주문의 `store_id`는 해당 거래가 발생한 매장을 뜻합니다. 두 값이 반드시 같아야 한다고 제한하면 다른 매장에서 이루어진 주문을 표현할 수 없습니다.
+
+제공 데이터에도 주요 매장과 다른 매장에서 주문한 고객이 40,951명 있습니다. 고객을 주요 매장에만 연결된 사람으로 가정하기보다, 주요 매장 관계와 각각의 주문 관계를 구분하여 이해해야 합니다. 고객 정보를 조회할 때도 어떤 관계로 매장과 연결되는지 구분해야 하며, 각 관계에 따른 접근 허용 여부는 별도의 정책으로 결정합니다.
+
+전체 테이블의 키와 연결 관계는 [데이터 설명서의 ERD](../../data/README.md#테이블-관계도)에 정리되어 있습니다. 상품 분류인 `categories`와 상품 유형인 `product_types`도 `products`와 연결되며, 같은 키와 참조 관계의 원리로 읽을 수 있습니다.
+
+## 2. 스키마와 테이블 만들기
+
+### 목표
+
+업무 테이블 8개를 생성하고, 각 열에 저장할 값의 종류와 잘못된 데이터를 거부할 규칙을 설정합니다. 1번에서 살펴본 테이블 관계를 실제 데이터베이스에서 유지하도록 구현합니다.
+
+### 원리와 구현 기준
+
+데이터베이스가 데이터를 저장하거나 변경할 때 검사할 규칙을 **제약조건(Constraint)**이라고 합니다. 1번에서 배운 기본 키와 외래 키도 제약조건입니다. 이번에는 값의 종류를 정하는 자료형과, 입력·중복·관계를 검사하는 제약조건을 구분하여 적용합니다.
+
+#### 스키마로 업무 테이블 묶기
+
+업무 테이블은 모두 `retail` [스키마(Schema)](https://www.postgresql.org/docs/18/ddl-schemas.html)에 생성합니다. 스키마는 데이터베이스 안에서 관련 테이블 등을 묶고, 같은 테이블 이름을 구분하는 단위입니다. `retail.products`는 `retail` 스키마 안의 `products` 테이블을 뜻합니다. 관련 테이블을 한 스키마에 모으면 이름과 관리 범위를 일관되게 유지할 수 있습니다.
+
+스키마는 사용 권한과 그 안에 테이블을 생성할 권한을 관리하는 단위이기도 합니다. 다만 스키마를 생성하는 것만으로 서버 조회 계정에 테이블을 읽을 권한이 생기거나 매장별 데이터가 격리되지는 않습니다. 이 단계에서는 `retail` 스키마와 업무 테이블 8개를 생성합니다. 서비스 계정의 테이블 조회 권한과 행 접근을 제한하는 RLS 정책은 4번 ‘서비스 계정과 RLS 구성하기’에서 설정합니다.
+
+#### 열에 맞는 자료형 선택하기
+
+재고 수량과 전화번호는 모두 숫자처럼 보일 수 있습니다. 하지만 재고는 더하거나 비교하는 수량이고, 전화번호는 앞자리의 0이나 국가 코드 같은 표현을 보존해야 하는 연락처입니다. 따라서 재고는 정수로, 전화번호는 문자열로 저장합니다.
+
+이처럼 열에 저장할 값의 종류와 표현 범위를 정하는 것이 **자료형(Data Type)**입니다. 이번 실습에서는 다음 자료형을 사용합니다. 각 CSV의 열은 [데이터 설명서](../../data/README.md)에서 확인합니다.
+
+| 저장할 정보 | PostgreSQL 자료형 | 선택 이유 |
+| :--- | :--- | :--- |
+| 정수 ID, 재고·판매 수량, `discount_percent` | `integer` | 제공 식별자와 정수 값을 그대로 표현 |
+| 이름, 상품 코드, 설명, 이메일·전화번호 | `text` | 문자열의 표현을 보존 |
+| 원가·기본 가격·주문 단가·할인 금액·거래 금액 | `numeric(10,2)` | 금액을 정확한 십진수로 저장하고 소수점 이하 두 자리 사용 |
+| `gross_margin_percent` | `numeric(5,2)` | 소수점 이하 두 자리로 기록된 마진 비율 보존 |
+| `is_online` | `boolean` | 온라인 매장 여부를 참·거짓으로 표현 |
+| `rls_user_id` | `uuid` | 제공된 UUID 형식의 매핑 식별자 보존 |
+| `order_date` | `date` | 시각을 포함하지 않는 주문일 저장 |
+| `created_at` | `timestamp without time zone` | 시간대 정보 없는 고객 생성 시각 보존 |
+
+정수 ID는 CSV의 값을 그대로 사용합니다. 자동 생성 기능을 붙이거나 적재 순서대로 번호를 다시 부여하지 않습니다. 예를 들어 고객 ID를 바꾸면 그 고객의 주문에 저장된 ID까지 바꾸어야 하므로, 기존 식별자와 연결 관계를 함께 보존해야 합니다. `rls_user_id`는 별도의 UUID 형식 열이며, 이 프로젝트의 호출자 인증이나 매장 접근 권한을 증명하는 값으로 사용하지 않습니다.
+
+`numeric`은 정수와 소수를 저장할 수 있으며, 부동소수점에서 발생할 수 있는 숫자의 표현 오차를 피할 수 있는 자료형입니다. 예를 들어 `0.1`은 부동소수점으로는 근삿값으로 저장되지만, `numeric`으로는 정확히 저장할 수 있습니다. 이 프로젝트에서는 금액을 저장하는 데 사용합니다.
+
+금액 열에 사용하는 `numeric(10,2)`의 10은 전체 자릿수, 2는 소수점 이하 자릿수입니다. 정수 부분에는 최대 여덟 자리를 사용할 수 있습니다. 음수 허용 여부 같은 업무 규칙은 자료형과 별도로 정합니다. Python에서 적재 값을 다룰 때도 정확한 십진수를 표현하는 `Decimal`을 사용하여 금액을 부동소수점으로 바꾸지 않습니다.
+
+소수 자릿수를 지정하면 초과 자릿수가 자동으로 거부되는 것은 아닙니다. 예를 들어 `12.345`를 `numeric(10,2)`에 저장하면 `12.35`로 반올림됩니다. 따라서 적재 코드는 금액이 정한 범위와 소수 자릿수에 맞는지 먼저 확인하고, 입력값을 임의로 반올림하여 맞추지 않아야 합니다. [PostgreSQL의 numeric 설명](https://www.postgresql.org/docs/18/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL)을 기준으로 이 동작을 확인합니다.
+
+주문일과 고객 생성 시각도 구분합니다. `order_date`에는 날짜를, `created_at`에는 날짜와 시각을 저장합니다. 제공된 생성 시각에는 시간대가 없으므로 UTC로 가정하거나 시간대를 임의로 붙이지 않습니다.
+
+#### 필수 값과 기본값 정하기
+
+재고 수량이 `0`이면 재고가 없다는 뜻입니다. NULL이면 수량을 알 수 없는 상태를 나타냅니다. 수량이 빠진 입력을 `0`으로 채우면 “확인하지 못한 재고”가 “재고 없음”으로 바뀝니다. 따라서 재고 수량은 필수 값으로 지정하고, 값이 없는 입력은 거부해야 합니다.
+
+**NOT NULL 제약조건(Not-Null Constraint)**은 열에 NULL을 허용하지 않는 규칙입니다. 아래는 이 프로젝트에 적용할 기준입니다. NULL 허용 열에 적지 않은 나머지 열은 모두 필수로 지정합니다. 기본 키를 구성하는 열에는 기본 키의 규칙에 따라 NULL이 허용되지 않습니다.
+
+| 테이블 | NULL 허용 열 | 판단 기준 |
+| :--- | :--- | :--- |
+| `stores` | `rls_user_id` | 매장 ID·매장명·온라인 매장 여부는 필수입니다. `rls_user_id`는 값이 없어도 매장 정보를 관리할 수 있으므로 NULL을 허용합니다. |
+| `categories` | 없음 | 분류 ID와 이름을 필수로 관리 |
+| `product_types` | 없음 | 유형 ID·이름과 소속 분류를 필수로 관리 |
+| `products` | `gross_margin_percent` | 상품 식별·분류·가격·설명을 필수로 관리하고, 보조 정보인 마진 비율은 미등록 허용 |
+| `customers` | `phone`, `primary_store_id` | 고객 ID·이름·이메일·생성 시각은 필수로 관리하고, 전화번호와 주요 매장은 미등록 허용 |
+| `orders` | 없음 | 주문 ID·고객·매장·주문일을 필수로 관리 |
+| `order_items` | 없음 | 상세 ID·관계·수량·단가·할인·거래 금액을 필수로 관리 |
+| `inventory` | 없음 | 매장·상품·재고 수량을 필수로 관리 |
+
+고객의 주요 매장이 없어도 주문에는 실제 매장을 지정할 수 있습니다. 전화번호가 없어도 고객과 주문의 관계를 표현할 수 있습니다. 반면 주문 금액이 없으면 집계할 금액을 알 수 없으므로 필수 값으로 관리합니다. 할인 없음은 할인율과 할인 금액에 명시적으로 `0`을 기록합니다. 현재 CSV에 NULL이 없다는 사실과, 앞으로 값이 없는 상태를 허용할지는 별개의 판단입니다.
+
+상품 설명은 이후 상품 검색에 사용할 정보이므로 이번 실습에서는 필수로 관리합니다. 마진 비율과 매장별 매핑 식별자는 값이 없어도 핵심 상품 조회와 거래 관계를 유지할 수 있으므로 NULL을 허용합니다. NULL 허용 열도 CSV에 값이 있으면 그 값을 그대로 적재합니다. NOT NULL은 NULL을 거부하는 규칙이며, 빈 문자열이나 공백만 있는 이름의 유효성까지 자동으로 검사하는 것은 아닙니다.
+
+**기본값(Default)**은 새 행을 넣을 때 해당 열의 입력을 생략한 경우 사용할 값입니다. 이번 실습에서는 모든 열에 명시적인 기본값을 두지 않고, CSV의 값을 직접 적재합니다. 재고에 `0`을 넣거나 고객 생성 시각을 현재 시각으로 채우는 설정도 하지 않습니다. 필수 입력이 누락되면 오류로 발견하고 원인을 확인합니다.
+
+기본값을 지정하지 않은 열의 입력을 생략하면 NULL이 사용됩니다. 이때 NOT NULL인 열은 오류가 발생하고, NULL을 허용한 열은 NULL을 저장할 수 있습니다. 또한 기본값이 있더라도 명시적으로 입력한 NULL을 그 기본값으로 바꾸지는 않습니다. 실제 적재에서는 CSV 헤더와 열을 모두 대응시켜 누락된 입력이 없는지 확인합니다.
+
+#### 키와 제약조건으로 규칙 적용하기
+
+정수 자료형은 음수도 표현하므로 재고에 `-1`을 저장하는 것을 자동으로 막지 않습니다. 행 식별·중복 방지·참조·값의 범위 같은 업무 규칙은 제약조건으로 정합니다.
+
+먼저 각 테이블의 기본 키를 다음과 같이 지정합니다. 기본 키 외에도 중복되어서는 안 되는 값에는 **고유 제약조건(Unique Constraint)**을 둡니다. 예를 들어 상품 ID가 서로 달라도 같은 SKU를 두 상품에 부여해서는 안 되므로 SKU에 별도의 중복 방지 규칙이 필요합니다.
+
+| 테이블 | 기본 키 | 추가 고유 제약조건 |
+| :--- | :--- | :--- |
+| `stores` | `store_id` | `store_name` |
+| `categories` | `category_id` | `category_name` |
+| `product_types` | `type_id` | `(type_id, category_id)` |
+| `products` | `product_id` | `sku` |
+| `customers` | `customer_id` | `email` |
+| `orders` | `order_id` | `(order_id, store_id)` |
+| `order_items` | `order_item_id` | 없음 |
+| `inventory` | `(store_id, product_id)` | 없음 |
+
+매장명·분류명·SKU·이메일은 각 테이블 전체에서 중복되지 않도록 관리합니다. 고유 제약조건만으로 필수 입력이 되는 것은 아니므로, 이 열들은 NOT NULL도 적용합니다. 두 열로 구성한 고유 제약조건은 다음에 설명할 조합 참조를 위한 것입니다.
+
+외래 키는 데이터 설명서의 관계에 맞춰 적용합니다. 상품 유형의 분류, 상품의 분류·유형, 고객의 주요 매장, 주문의 고객·매장, 상세의 주문·상품, 재고의 매장·상품을 연결합니다. 고객의 주요 매장은 NULL을 허용하되 값이 있으면 실제 매장을 참조해야 합니다.
+
+**검사 제약조건(Check Constraint)**은 각 행의 값이 정한 조건을 만족하는지 검사합니다. 이 프로젝트에서는 다음 범위를 적용합니다.
+
+| 대상 | 검사할 규칙 |
+| :--- | :--- |
+| `inventory.stock_level` | 0 이상 |
+| `order_items.quantity` | 0보다 큼 |
+| `products.cost`, `products.base_price` | 0 이상 |
+| `order_items.unit_price`, `discount_amount`, `total_amount` | 0 이상 |
+| `order_items.discount_percent` | 0~100 |
+
+재고의 “0 이상” 조건만으로 NULL까지 막을 수는 없습니다. NOT NULL은 값이 있어야 한다는 규칙이고, 범위 검사는 그 값이 허용 범위 안에 있어야 한다는 규칙입니다. 두 규칙을 함께 적용해야 재고 수량 누락과 음수 재고를 모두 막을 수 있습니다.
+
+외래 키는 관계가 유효한지 검사하고, RLS는 조회 계정에 어떤 행을 보여 줄지 판단합니다. RLS가 적용되어도 잘못된 관계가 자동으로 수정되지는 않으므로 테이블 구조의 제약조건을 먼저 갖추어야 합니다.
+
+#### 여러 열의 조합으로 관계 검사하기
+
+1번의 가상 예시에서 주문 9001은 매장 1의 주문입니다. 매장 2도 존재한다고 가정하면, 상세에 `order_id=9001`과 `store_id=2`를 넣어도 각각의 ID는 유효합니다. 그러나 두 값을 함께 보면 실제 주문의 소속과 다릅니다.
+
+이 오류는 주문 ID와 매장 ID에 외래 키를 각각 두는 것만으로 막을 수 없습니다. 상세의 `(order_id, store_id)`가 `orders`의 **같은 행에 있는 두 값**과 일치하도록 함께 참조해야 합니다.
+
+이때 `orders`에는 `(order_id, store_id)`의 고유 제약조건을 둡니다. `order_id`가 이미 기본 키여도, 두 열을 함께 참조하는 외래 키의 대상으로 삼으려면 참조할 열 조합에 맞는 고유 제약조건을 준비해야 합니다. 기본 키를 두 개 만드는 것이 아니라, 기본 키와 별도로 두 열의 조합을 참조 대상으로 지정하는 것입니다.
+
+상품과 상품 유형에도 같은 원리를 적용합니다. `products`의 `(type_id, category_id)`가 `product_types`의 같은 조합을 참조하도록 합니다. 유형 ID와 분류 ID가 각각 존재하더라도 그 유형이 다른 분류에 속해 있다면 거부해야 합니다.
+
+여러 열을 참조할 때는 열을 대응시키는 순서도 맞춥니다. `order_id`는 `order_id`에, `store_id`는 `store_id`에 연결되어야 합니다. ID가 모두 정수라는 이유만으로 순서를 바꾸면 서로 다른 의미의 값을 비교하게 됩니다.
+
+#### 과거 거래를 보존하는 구조 만들기
+
+재고 행은 현재 어느 매장이 어떤 상품을 취급하고 얼마나 보유하는지 나타냅니다. 과거 주문 상세는 이미 발생한 거래의 기록입니다. 어떤 매장에서 상품 취급을 중단하여 재고 행을 삭제하더라도 과거 판매 기록은 유지되어야 합니다.
+
+따라서 `order_items`의 상품은 `products`를, 주문·매장 조합은 `orders`를 참조하도록 하고, 현재 `inventory` 행을 반드시 참조하게 만드는 외래 키는 두지 않습니다. 과거 주문의 유효성을 현재 재고 행의 존재 여부에 종속시키지 않는 것입니다.
+
+금액에 적용할 규칙도 제공 데이터의 의미에 맞춰야 합니다. `total_amount`가 `quantity × unit_price − discount_amount`와 최대 0.03 차이 나는 행이 있습니다. 제공된 열만으로 계산 정밀도나 반올림 순서를 확정할 수 없으므로, 이 등식을 검사 제약조건으로 강제하거나 저장 금액을 재계산하지 않습니다. 금액의 0 이상 조건은 적용하되, 집계에는 저장된 `total_amount`를 사용합니다.
+
+#### 조회에 필요한 인덱스 준비하기
+
+매출 분석 도구는 특정 매장과 기간에 해당하는 주문을 찾고, 고객 조회는 특정 고객과 매장의 주문 관계를 확인합니다. 행이 많아지면 조건에 맞는 행을 찾는 비용도 커집니다. **[인덱스(Index)](https://www.postgresql.org/docs/18/indexes-intro.html)**는 이런 조회에서 행을 찾는 데 도움을 주는 별도의 자료구조입니다.
+
+인덱스는 저장 공간을 사용하고 데이터가 바뀔 때 함께 관리해야 하므로 필요한 조회에 맞춰 준비합니다. PostgreSQL은 기본 키와 고유 제약조건을 만들 때 이를 지원하는 인덱스를 생성합니다. 외래 키를 만들었다고 참조하는 쪽의 열에도 인덱스가 자동 생성되는 것은 아니므로, 기존 인덱스와 조회 조건을 함께 확인합니다.
+
+| 조회 목적 | 추가 인덱스 검토 대상 |
+| :--- | :--- |
+| 매장별·기간별 주문 조회 | `orders(store_id, order_date)` |
+| 고객과 특정 매장의 주문 관계 확인 | `orders(customer_id, store_id)` |
+| 매장별 주문 상세 조회와 주문 연결 | `order_items(store_id, order_id)` |
+
+위 조합은 조회 목적에 따른 후보입니다. 실제로 사용할 조건과 기존 인덱스를 대조하여 선택하고, 생성 이유를 기록합니다. 여러 열을 사용한 인덱스는 앞쪽 열에 어떤 조건을 적용하는지가 중요합니다. 예를 들어 `(store_id, order_date)`는 매장을 지정하고 그 매장 안에서 기간을 제한하는 조회를 고려한 순서입니다.
+
+재고는 기본 키 `(store_id, product_id)`가 만든 인덱스부터 확인합니다. 매장 조건을 위해 같은 목적의 인덱스를 무조건 추가하지 않습니다. 제약조건을 지원하는 인덱스는 해당 규칙을 유지하는 역할도 있으므로, 조회용 중복 여부만 보고 제거하지 않습니다. 이번 단계에서는 필요한 구조와 선택 이유를 정하고, 상세 성능 튜닝까지 진행하지 않습니다.
+
+### 진행할 작업
+
+- `retail` 스키마를 생성하고 업무 테이블의 이름과 소속 스키마를 정합니다.
+- CSV의 모든 열을 대상으로 자료형·NULL 허용 여부를 정리하고, 명시적인 기본값을 두지 않는 기준을 확인합니다.
+- 업무 테이블 8개를 생성하고, 제공된 정수 ID를 명시적으로 저장하는 기본 키를 적용합니다.
+- 표의 고유 제약조건·외래 키·필수 입력·수량 및 금액 범위 검사를 구성합니다.
+- 주문·매장 및 상품 유형·분류 조합을 함께 검사하는 참조 관계를 구현합니다.
+- 주요 조회 조건과 기존 인덱스를 대조하여 추가 인덱스를 선택하고 이유를 기록합니다.
+- 생성 구성을 프로젝트 파일로 관리하고, 테이블·열·제약조건·인덱스가 의도한 정의로 생성되었는지 확인합니다.
+
+### 완료 기준
+
+`retail` 스키마에 업무 테이블 8개가 생성되어 있고, 열별 자료형·NULL 허용 여부와 기본값 없는 구성을 확인했습니다. 필요한 기본 키·고유 제약조건·외래 키·범위 검사와 선택한 인덱스가 정의되어 있습니다.
+
+각 제약조건이 어떤 오류를 막는지, 각 인덱스가 어떤 조회를 위한 것인지 설명할 수 있습니다. 이 단계의 완료는 테이블과 규칙이 준비되었다는 뜻입니다. 데이터 적재 결과와 실제 입력의 허용·거부, 서비스 계정의 접근 제한은 이후 검증에서 확인합니다.
+
+## 3. 실습 데이터 넣기
+
+### 목표
+
+제공 CSV 8개를 앞에서 만든 업무 테이블에 저장합니다.
+
+### 사용할 프로그램
+
+[적재 스크립트](../../scripts/csv_to_postgres.py)는 한 번에 CSV 하나를 같은 이름의 `retail` 테이블에 저장합니다. 실행 명령과 적재 순서는 [실행 안내](../../scripts/README.md)를 따릅니다.
+
+### 진행할 작업
+
+- 실행 안내에 따라 접속 설정과 2번에서 만든 대상 테이블을 확인합니다.
+- 안내된 순서대로 [제공 CSV](../../data/source/) 8개를 적재합니다.
+- 파일별 적재·검증 완료 여부를 정리합니다.
+- 오류가 발생하면 후속 적재를 중단하고 원인과 저장 상태를 보고합니다.
+
+파일별로 저장이 확정되므로 중간에 실패해도 앞서 완료한 데이터는 유지됩니다.
+
+### 완료 기준
+
+CSV 8개의 적재와 프로그램의 커밋 후 검증이 모두 완료되었습니다.
+
+## 4. 서비스 계정과 RLS 구성하기
+
+### 목표
+
+서버가 사용할 조회 계정을 만들고, 공용 정보와 매장별 데이터에 필요한 조회 권한과 RLS 정책을 구성합니다.
+
+### 원리와 구현 기준
+
+#### 서버 전용 조회 계정 만들기
+
+MCP 서버도 PostgreSQL에 접속하려면 DB 계정이 필요합니다. 테이블을 만들고 데이터를 적재한 관리 계정을 서버에서도 사용하면, 조회만 필요한 서버가 데이터를 변경하거나 접근 제한을 바꿀 수 있습니다. 이 프로젝트에서는 서버 전용 조회 계정을 만들어 관리 계정과 분리합니다.
+
+PostgreSQL은 계정과 권한을 **역할(Role)**이라는 단위로 관리합니다. `LOGIN` 속성이 있는 역할은 DB 접속 계정으로 사용할 수 있습니다. 이번에는 조회용 로그인 역할 하나를 만들고, 필요한 권한을 그 역할에 직접 부여합니다. [PostgreSQL 역할 속성](https://www.postgresql.org/docs/18/role-attributes.html)에서 접속과 관리 권한을 결정하는 속성을 확인할 수 있습니다.
+
+조회 계정에는 대상 DB에 접속할 권한(`CONNECT`), `retail` 스키마를 사용할 권한(`USAGE`), 아래 표에 있는 업무 테이블 8개를 읽을 권한(`SELECT`)을 부여합니다. 데이터를 추가·수정·삭제하거나 테이블·DB·다른 역할을 만드는 데 필요한 권한은 부여하지 않습니다.
+
+RLS가 이 계정에 적용되는지도 중요합니다. 슈퍼유저와 `BYPASSRLS` 속성이 있는 역할은 RLS를 우회하며, 테이블 소유자도 기본적으로 RLS의 적용을 받지 않습니다. 따라서 조회 계정은 이들 권한이나 소유권을 갖지 않도록 하고, 다른 역할을 통해 소유자나 관리 권한을 사용할 수도 없도록 구성합니다.
+
+#### 조회 권한과 RLS 정책 함께 구성하기
+
+서버가 매장 A의 주문을 조회한다고 가정해 보겠습니다. 먼저 서버 계정에 `orders` 테이블을 읽을 권한이 있어야 합니다. 그다음 조회 결과에는 매장 A의 주문만 포함되도록 제한해야 합니다. **테이블 조회 권한은 읽기 작업을 허용하고, RLS는 읽을 수 있는 행을 제한합니다.**
+
+`GRANT`는 역할에 권한을 부여하는 명령입니다. RLS 정책을 만드는 것만으로 테이블 조회 권한이 생기는 것은 아니므로, 조회 계정에 필요한 권한도 함께 부여해야 합니다.
+
+조회용 RLS 정책에는 다음 세 가지를 지정합니다.
+
+| 구성 요소 | 이 프로젝트에서 지정할 내용 |
+| :--- | :--- |
+| 적용 역할 | 서버가 접속하는 조회용 역할 |
+| 적용 작업 | 데이터를 읽는 `SELECT` 작업 |
+| 행 접근 조건 | 해당 행을 조회할 수 있는지 판단하는 `USING` 조건 |
+
+예를 들어 주문 정책의 `USING` 조건은 주문의 `store_id`가 이번 조회의 매장 ID와 일치하는지 검사합니다. 조건을 만족하지 않는 주문은 조회 결과에 포함되지 않습니다.
+
+정책 생성과 RLS 활성화는 별도 작업입니다. 정책을 만들어도 테이블에 RLS를 활성화하지 않으면 행 제한이 적용되지 않습니다. 반대로 RLS가 적용되는 계정에서 조회할 때, RLS를 활성화했지만 적용 가능한 허용 정책이 없으면 조회되는 행이 없습니다. 테이블별로 정책과 활성화 상태를 함께 확인해야 합니다. [PostgreSQL RLS 설명](https://www.postgresql.org/docs/18/ddl-rowsecurity.html)에서도 이 동작과 계정별 적용 예외를 설명합니다.
+
+#### 테이블별 조회 규칙 정하기
+
+이 프로젝트에서는 다음 기준으로 조회를 허용합니다.
+
+| 대상 | 서비스 계정의 조회 기준 |
+| :--- | :--- |
+| `stores`, `categories`, `product_types`, `products` | 매장별 행 제한 없이 공용 정보로 조회 허용 |
+| `inventory`, `orders`, `order_items` | 행의 `store_id`가 이번 조회의 매장 ID와 일치 |
+| `customers` | `primary_store_id`가 이번 매장이거나, 이번 매장에 해당 고객의 주문이 존재 |
+
+공용 테이블은 조회 권한으로 접근을 제어하고, 매장별·고객 관계 제한이 필요한 테이블에는 RLS를 적용합니다. 공용 정보도 서비스 계정의 권한으로 조회하는 데이터이며, 인증 없이 외부에 공개한다는 뜻은 아닙니다.
+
+고객 접근 조건은 이 프로젝트에서 채택한 업무 정책입니다. 고객 C의 주요 매장이 A이고 주문 매장이 B라면 A와 B 모두 고객 C의 프로필을 조회할 수 있습니다. 하지만 고객 프로필을 읽을 수 있다고 다른 매장의 주문까지 읽을 수 있는 것은 아닙니다. A에서 조회하면 B의 주문과 주문 상세는 각 테이블의 매장 제한에 따라 보이지 않아야 합니다.
+
+고객의 주문 관계를 확인할 때는 같은 `customer_id`의 주문이 이번 조회의 매장에 있는지 검사합니다. 매장 조건 없이 주문 존재 여부만 확인하면 다른 매장에서만 주문한 고객까지 허용할 수 있습니다.
+
+정책끼리 서로를 다시 참조하지 않도록 구성하는 것도 필요합니다. 고객 정책에서 주문을 확인하는데 주문 정책이 다시 고객을 조회하면, 정책 적용이 서로를 반복해서 요구하는 순환 참조가 생길 수 있습니다. 이 프로젝트의 주문 정책은 고객 정책을 참조하지 않고 주문 행 자체의 `store_id`로 접근을 판단하도록 구성합니다.
+
+#### 정책에서 사용할 매장 ID 정하기
+
+RLS 정책은 `app.current_store_id`라는 사용자 정의 설정값에 저장된 매장 ID를 읽습니다. 이 설정값이 없거나 유효하지 않을 때는 보호 대상 행을 반환하지 않도록 합니다. 오류로 작업을 중단할 수는 있지만, 기본 매장을 임의로 선택하거나 전체 매장 조회를 허용해서는 안 됩니다.
+
+조회 계정은 서버가 DB에 접속하는 데 사용하는 계정입니다. 이 계정으로 접속했다는 사실만으로 호출자가 어느 매장에 접근할 수 있는지 알 수는 없습니다. 서버는 호출자의 작업·매장 접근 권한을 먼저 확인하고, 허용된 매장 ID를 DB에 전달해야 합니다. RLS는 전달받은 ID로 행을 제한하므로, 이 값 자체가 호출자의 권한을 증명하는 것은 아닙니다.
+
+이번 단계에서는 이 설정값을 사용하는 정책을 구성합니다. 같은 연결의 트랜잭션 안에서 매장 ID를 설정하는 절차는 5번에서 진행하고, 실제 서비스 계정의 매장별 허용·차단 동작은 6번에서 종합 검증합니다.
+
+### 진행할 작업
+
+- 관리 계정으로 서버 전용 조회용 로그인 역할 하나를 생성하고, 역할 이름과 관리 계정과의 구분을 기록합니다.
+- 조회 역할에 대상 DB의 접속 권한, `retail` 스키마 사용 권한, 업무 테이블 8개의 조회 권한을 직접 부여합니다.
+- 조회 역할이 테이블을 소유하거나 RLS를 우회하지 않으며, 불필요한 데이터 변경·객체 생성·관리 권한을 갖지 않도록 구성합니다. 다른 역할을 통해 사용할 수 있는 권한도 확인합니다.
+- `inventory`, `orders`, `order_items`, `customers`에 RLS를 활성화합니다.
+- 표의 조회 규칙에 따라 서비스 역할을 대상으로 하는 `SELECT` 정책과 `USING` 조건을 구성합니다. 정책에서 사용할 매장 ID는 `app.current_store_id`에서 읽습니다.
+- 고객 정책은 주요 매장 또는 해당 매장의 주문 관계를 확인하도록 하고, 주문 정책과 순환 참조가 생기지 않도록 구성합니다.
+- 역할 속성·소유권·부여된 권한·정책 정의·RLS 활성화 상태를 확인하고 결과를 기록합니다. 의도하지 않은 접근을 허용하는 기존 정책이 남아 있는지도 확인합니다.
+
+### 완료 기준
+
+서버 전용 조회 역할 하나에 필요한 권한이 직접 부여되어 있고, 매장별 데이터와 고객 정보를 제한하는 조회 정책이 생성되어 있습니다. 보호 대상 테이블의 RLS 활성화 상태와 조회 역할의 속성·소유권·권한·정책 정의를 확인했습니다. 매장 ID를 설정한 실제 조회와 종합 검증은 이어지는 5·6번에서 진행합니다.
+
+## 5. 조회할 매장 지정하기
+
+### 목표
+
+서비스 계정으로 조회할 매장 ID를 이번 트랜잭션에서만 유효하도록 설정하고, 작업이 끝난 뒤 다음 조회에 영향을 주지 않는지 확인합니다.
+
+### 원리와 구현 기준
+
+#### RLS 정책에 매장 ID 전달하기
+
+4번에서 만든 정책이 매장별로 행을 제한하려면 이번에 어느 매장을 조회할지 알아야 합니다. 이 프로젝트에서는 `app.current_store_id`라는 사용자 정의 설정값에 조회할 매장 ID를 저장합니다.
+
+RLS 정책은 `current_setting`으로 이 설정값을 읽습니다. 주문·주문 상세·재고 정책은 설정된 매장 ID를 각 행의 `store_id`와 비교합니다. 고객 정책은 그 매장을 기준으로 주요 매장 또는 주문 관계를 확인합니다. 서버에서는 호출자의 접근 권한을 먼저 확인한 뒤 이 값을 전달해야 합니다.
+
+#### 이번 조회에만 설정 적용하기
+
+매장 1을 조회한 뒤 같은 DB 연결로 매장 2를 조회할 수 있습니다. 첫 작업에서 설정한 매장 ID가 계속 남아 있으면, 다음 작업이 자신의 매장 ID를 지정하지 않았는데도 매장 1의 데이터를 읽을 수 있습니다. 설정이 유효한 기간을 이번 작업으로 한정해야 하는 이유입니다.
+
+이를 위해 매장 ID 설정과 조회를 하나의 **트랜잭션(Transaction)**으로 묶습니다. 데이터를 변경하지 않는 조회 작업에서도 트랜잭션을 사용할 수 있습니다. 여기서는 설정값이 적용되는 범위를 정하는 데 사용합니다.
+
+작업은 다음 순서로 수행합니다.
+
+1. 4번에서 만든 서비스 계정으로 DB에 연결합니다.
+2. 트랜잭션을 명시적으로 시작합니다.
+3. `SET LOCAL`로 `app.current_store_id`에 이번 조회의 매장 ID를 설정합니다.
+4. 같은 연결에서 보호 대상 테이블을 조회합니다.
+5. 커밋(Commit) 또는 롤백(Rollback)으로 트랜잭션을 종료합니다.
+
+`SET LOCAL`은 현재 트랜잭션에서만 설정을 적용하는 명령입니다. 트랜잭션 밖에서 실행하면 경고가 발생하고 설정은 적용되지 않으므로, 트랜잭션을 먼저 시작해야 합니다. 또한 다른 연결에는 이 값이 전달되지 않습니다. 설정과 조회를 서로 다른 연결에서 실행하면 의도한 매장 ID를 기준으로 조회한 것이 아닙니다. [PostgreSQL SET 설명](https://www.postgresql.org/docs/18/sql-set.html)에서 적용 범위를 확인할 수 있습니다.
+
+#### 작업 종료 후 다음 조회 확인하기
+
+`SET LOCAL`로 지정한 값은 커밋과 롤백 어느 쪽으로 종료해도 더 이상 적용되지 않습니다. 다만 설정이 항상 빈 상태가 되는 것은 아닙니다. 연결 전체에 매장 2가 적용되도록 설정되어 있었다면, 트랜잭션 안에서 매장 1을 지정하더라도 종료 후에는 매장 2가 다시 적용될 수 있습니다.
+
+따라서 특정 매장 ID를 연결의 기본값으로 남기지 않고, 작업마다 트랜잭션 안에서 새로 지정합니다. 확인할 때도 연결을 끊고 새로 접속하지 말고, 같은 연결에서 다음 트랜잭션을 시작해야 이전 작업의 영향이 남았는지 알 수 있습니다.
+
+매장 ID를 지정하지 않았거나 값이 빈 문자열인 경우에는 주문·주문 상세·재고·고객 행이 노출되지 않아야 합니다. 정수로 해석할 수 없는 값도 조회를 차단해야 하며, 오류로 작업을 중단해도 됩니다. 존재하지 않는 매장 ID로 조회할 때도 보호 대상 행이 반환되지 않아야 합니다. 어느 경우에도 기본 매장을 임의로 선택하거나 전체 매장 조회로 바꾸지 않습니다. 이 기준은 공용 테이블의 조회 규칙과 구분합니다.
+
+### 진행할 작업
+
+- 4번에서 만든 서비스 계정으로 접속하고, 연결의 기본 설정에 특정 매장 ID가 남아 있지 않은지 확인합니다.
+- 트랜잭션을 시작한 뒤 `SET LOCAL`로 매장 1을 지정하고, 주문이나 재고를 조회하여 반환된 행의 매장 ID를 확인합니다.
+- 해당 트랜잭션을 커밋합니다. 같은 연결에서 새 트랜잭션을 시작하고, 매장 ID를 지정하지 않은 상태에서 보호 대상 행이 노출되지 않는지 확인합니다.
+- 같은 연결에서 다음 트랜잭션을 시작해 매장 2를 지정하고, 매장 2의 행이 조회되는지 확인한 뒤 롤백합니다. 이후 매장 ID를 지정하지 않은 새 트랜잭션에서도 보호 대상 행이 노출되지 않는지 확인합니다.
+- 빈 문자열, 정수로 해석할 수 없는 값, 존재하지 않는 매장 ID도 각각 별도의 트랜잭션에서 확인합니다. 조회 결과가 없거나 오류로 중단되는 등 데이터가 노출되지 않는지 확인하고, 오류가 난 트랜잭션은 롤백한 뒤 다음 확인을 진행합니다.
+- 각 작업의 매장 ID, 반환된 행의 소속, 커밋·롤백 여부와 다음 트랜잭션의 조회 결과를 기록합니다.
+
+### 완료 기준
+
+실제 서비스 계정으로 같은 연결에서 매장 1·2의 조회를 수행했고, 설정한 매장에 해당하는 행이 반환되는지 확인했습니다. 커밋·롤백 후 매장 ID를 지정하지 않은 다음 트랜잭션에 이전 작업의 값이 적용되지 않으며, 값이 없거나 유효하지 않은 경우 보호 대상 데이터가 노출되지 않습니다.
+
+## 6. 데이터베이스 검증 설계하기
+
+### 목표
+
+구축한 DB가 요구사항을 충족한다고 판단하려면 어떤 근거가 필요한지 생각하고, 그 근거를 확보할 검증을 설계합니다. 에이전트가 제안한 검사와 기대 결과를 검토하고, 실행 결과가 결론을 뒷받침하는지 판단합니다.
+
+### 원리와 검증 기준
+
+#### 요구사항을 확인할 수 있는 조건으로 바꾸기
+
+테이블과 정책이 생성되었다는 사실은 구현이 존재한다는 뜻입니다. 그 구현이 업무 규칙을 지키는지 판단하려면 실제 동작에서 무엇을 확인해야 하는지 정해야 합니다. 검증의 출발점은 작성한 SQL의 목록보다, 그 SQL로 지키려던 요구사항입니다.
+
+예를 들어 '매장별 데이터가 격리되어야 한다'는 요구사항을 생각해 보겠습니다. 다른 매장의 데이터가 보이지 않는 것만 확인하면 충분할까요? 정책이 모든 행을 숨기면 다른 매장의 데이터는 보이지 않지만, 필요한 조회도 할 수 없습니다. 따라서 다음 두 조건을 함께 확인해야 합니다.
+
+- 조회할 매장에 속하고 접근이 허용된 데이터는 빠짐없이 반환됩니다.
+- 접근이 허용되지 않은 다른 매장의 데이터는 반환되지 않습니다.
+
+요구사항을 이렇게 나누면 정상적으로 성공해야 할 동작과 차단해야 할 동작이 드러납니다. 고객 정보처럼 주요 매장과 주문 관계에 따라 접근을 허용하는 경우에도, 먼저 4번의 업무 규칙에서 허용할 대상과 차단할 대상을 구분해야 합니다. 단순히 '고객 조회 성공'이라는 결과만으로는 그 규칙을 지켰는지 판단할 수 없습니다.
+
+#### 잘못된 구현도 검사를 통과할 수 있는지 살펴보기
+
+검사를 제안받으면 **'잘못 구현되어도 이 검사를 통과할 수 있는가?'**를 질문합니다.
+
+**제약조건: 오류가 난 이유를 확인해야 합니다.** 주문과 매장은 각각 존재하지만 주문 상세에 상위 주문과 다른 매장을 연결했다고 가정해 보겠습니다. 입력이 거부되었더라도 서비스 계정의 쓰기 권한 부족 때문이라면 주문·매장 외래 키는 확인하지 못했습니다. 데이터를 추가할 권한이 있는 계정으로, 나머지 조건은 정상인 입력을 준비해야 해당 외래 키가 잘못된 관계를 거부하는지 알 수 있습니다. 오류 종류와 제약조건 이름을 확인하는 이유도 여기에 있습니다. [PostgreSQL 제약조건 설명](https://www.postgresql.org/docs/18/ddl-constraints.html)은 각 규칙이 어떤 입력을 제한하는지 설명합니다.
+
+**집계: 무엇을 한 건으로 세는지 확인해야 합니다.** 예를 들어 주문 하나에 상세가 세 개 있으면 두 테이블을 연결한 결과에는 주문이 세 번 나타납니다. 조회가 오류 없이 실행되고 양수가 나왔다는 이유로 주문 건수가 맞다고 할 수는 없습니다. 세려는 대상은 주문인데 상세 행을 세고 있지 않은지 살펴야 합니다. 금액도 같은 관점에서 판단합니다. 과거 거래 금액을 구하려는 요구사항이라면 현재 상품 가격인 `base_price`가 아니라 주문 상세에 저장된 `total_amount`가 계산의 근거가 됩니다.
+
+**접근 제한: 다른 조건이 정책의 오류를 가리지 않는지 확인해야 합니다.** 매장 1의 ID를 설정한 뒤 조회 SQL에도 `WHERE store_id = 1`을 넣으면, RLS가 잘못되어 있어도 조회 조건이 다른 매장의 행을 숨길 수 있습니다. RLS 자체를 확인하려면 그 매장 필터를 조회 SQL에서 제외하고 정책이 행을 제한하는지 살펴야 합니다. 실제 업무 조회에 매장 조건을 사용하는 것과, 정책의 작동 여부를 검사하는 것은 확인하려는 대상이 다릅니다.
+
+검증 데이터도 오류를 드러낼 수 있어야 합니다. 제공 데이터에서는 모든 매장에 같은 수의 재고 행이 있으므로, 건수만 비교하면 다른 매장의 행이 반환되는 오류를 놓칠 수 있습니다. 행의 매장 ID와 상품 ID를 대조해야 구별할 수 있습니다. 모든 매장에 같은 상품이 있다면 잘못된 상품·재고 연결이 드러나지 않을 수도 있습니다. 특정 매장에만 연결된 상품을 사례로 사용하면 해당 오류를 구별하기 쉬워집니다. 먼저 어떤 오류를 발견할지 생각하고, 현재 데이터로 구별할 수 있는지 판단한 뒤 추가 데이터의 필요성을 결정합니다.
+
+#### 기대 결과의 근거를 따로 구하기
+
+에이전트가 작성한 조회의 출력을 그대로 기대값으로 사용하면, 조회에 오류가 있어도 그 오류를 기준으로 통과시킬 수 있습니다. 기대 결과는 업무 규칙과 확인 가능한 데이터에서 구하고, 검사할 구현과 같은 오류를 공유하지 않는지 살펴야 합니다.
+
+예를 들어 주문·상세를 연결한 조회의 주문 건수는 `orders`에서 해당 매장을 직접 센 건수와 비교할 수 있습니다. 거래 금액은 `order_items`에서 같은 매장과 기간의 `total_amount`를 직접 합산하여 비교할 수 있습니다. 복잡한 조회를 그대로 복사해 비교 기준으로 사용하면 같은 중복 계산이 양쪽에 생길 수 있으므로, 기준을 구하는 조회는 확인하려는 값의 의미가 분명하도록 작성합니다.
+
+접근 제한은 관리 계정으로 업무 규칙에 맞는 예상 행을 구하고, 서비스 계정으로 조회한 결과와 비교할 수 있습니다. 관리 계정으로 실행했다는 사실만으로 기준 조회가 정확해지는 것은 아닙니다. 매장·기간 조건과 고객 접근 관계가 요구사항에 맞는지 검토해야 합니다. 비교 대상도 목적에 맞게 고릅니다. 건수는 결과의 규모를 보여 주지만, 허용된 행이 누락되거나 다른 행으로 바뀌지 않았는지는 식별자와 행의 소속까지 대조해야 판단할 수 있습니다.
+
+#### 검증 환경이 판단하려는 대상과 맞는지 확인하기
+
+실제 구축한 DB가 올바르게 작동한다고 판단하려면 그 DB의 구조·권한·정책과 조회 결과를 확인하는 것을 기본으로 합니다. 특히 접근 제한은 실제 서비스 계정으로 확인해야 합니다. 관리 계정과 서비스 계정은 같은 행을 조회하더라도 RLS의 적용 여부가 다를 수 있습니다. [PostgreSQL RLS 설명](https://www.postgresql.org/docs/18/ddl-rowsecurity.html)에서 소유자와 역할에 따른 적용 예외를 확인할 수 있습니다.
+
+잘못된 입력이나 현재 데이터에 없는 관계를 시험하려면 추가 데이터 또는 변경 작업이 필요할 수 있습니다. 이때는 실제 실습 DB에 미칠 영향과 변경을 되돌리는 방법을 검토하여 실행 환경을 선택합니다.
+
+별도 환경에서 실험했다면 실제 실습 DB와 구조·권한·정책·데이터에 어떤 차이가 있는지 확인합니다. 검증 DB에서 정책이 올바르게 작동해도 실제 실습 DB에 그 정책이 빠져 있다면 같은 결론을 적용할 수 없습니다. 검사한 환경과 판단하려는 DB의 차이를 확인해야 결과를 어디까지 적용할 수 있는지 알 수 있습니다.
+
+#### 결과로 판단할 수 있는 범위를 설명하기
+
+검증 결과를 보고할 때는 무엇이 확인되었는지와 아직 확인하지 못한 것을 함께 설명합니다. 몇 개 행을 골라 값이 일치했다면 그 표본에 대한 근거이며, 전체 행이 일치한다고 확대할 수는 없습니다. 매장 1의 조회가 성공했다면 다른 매장과 고객 관계에서도 같은 규칙이 작동하는지 필요한 사례를 검토해야 합니다.
+
+### 진행할 작업
+
+- 2·4·5번에서 정한 주요 요구사항을 바탕으로 정상적으로 허용되어야 할 동작과 거부되어야 할 동작을 정리합니다.
+- 에이전트는 요구사항별로 발견하려는 오류, 실행할 검사, 사용할 DB·계정·데이터, 기대 결과의 근거, 확인할 수 있는 범위와 한계를 포함한 검증 계획을 제안합니다.
+- 학습자는 잘못된 구현도 검사를 통과할 수 있는지, 기대 결과가 구현의 출력을 그대로 따르고 있지 않은지, 실행 환경이 확인하려는 대상과 맞는지 검토합니다. 부족한 검사는 이유와 함께 보완합니다.
+- 검토한 계획에 따라 에이전트가 SQL이나 검증 코드를 작성하고 실행합니다. 추가 데이터와 변경 작업은 필요성을 먼저 판단하고, 선택한 환경에서 다른 검사와 업무 데이터에 영향을 남기지 않도록 처리합니다.
+- 3번의 적재 결과와 5번의 설정 범위 검사 결과는 기존 근거를 활용하고, 앞에서 정한 요구사항 중 검증 근거가 부족한 부분에 필요한 검사를 추가합니다.
+- 사례별로 요구사항, 사용 환경·계정, 기대 결과의 근거, 실제 결과와 판정을 간단히 정리합니다. 실패와 미실행을 구분하고, 결과에 맞춰 기대값을 바꾸지 않습니다. 고객 이름·이메일·전화번호 대신 식별자·건수·집계값·비교 결과를 사용합니다.
+- 학습자는 결과가 판정을 뒷받침하는지 확인하고, 별도 환경에서 얻은 결과와 실제 실습 DB에서 확인한 사실, 남은 불확실성을 구분하여 설명합니다.
+
+### 완료 기준
+
+주요 요구사항에 필요한 검증을 수행하고, 각 판정을 뒷받침하는 근거를 확보했습니다. 학습자는 어떤 오류를 확인했으며 제안된 검사가 왜 적절한지, 결과로 어디까지 판단할 수 있는지 설명할 수 있습니다. 이번 실습의 요구사항별로 통과·실패·미확인 상태와 근거를 기록하고, 확인하지 못했거나 실패한 필수 요구사항은 완료로 처리하지 않습니다.
+
+## 핵심 요약
+
+- 데이터의 의미와 관계를 먼저 파악하고, 키와 제약조건으로 그 관계를 유지합니다.
+- 공용 상품, 매장별 재고·주문, 관계에 따른 고객 접근은 서로 다른 규칙을 가집니다.
+- 현재 상품의 기본 가격과 주문 단가·거래 금액을 구분하여 보존하고, 과거 거래 집계는 주문 상세에 저장된 값을 기준으로 합니다.
+- 관리 계정과 서버 조회 계정을 분리하고, 조회 계정에는 필요한 권한만 부여합니다. 테이블 조회 권한과 RLS의 행 접근 조건을 함께 구성하고, 실제 서비스 계정으로 접근 제한을 확인합니다.
+- 매장 ID는 같은 연결의 트랜잭션 안에서 지정하고, 다음 작업이 이전 작업의 설정에 의존하지 않도록 합니다.
+- 요구사항에서 정상 동작과 차단해야 할 동작을 도출하고, 잘못된 구현도 검사를 통과할 수 있는지 검토합니다. 기대 결과의 근거와 실제 결과를 대조하여 판정의 타당성을 확인합니다.
+
+## 다음 단계
+
+[실습 05: MCP 서버](../05-MCP-Server/README.md)에서는 이번에 구축한 데이터베이스에 연결하는 MCP 서버를 구현합니다. 서비스 계정과 매장 ID 설정 방식을 서버의 조회 처리에 적용합니다.
+
+## 추가 리소스
+
+### 테이블 설계
+
+- [PostgreSQL 제약조건](https://www.postgresql.org/docs/18/ddl-constraints.html): 기본 키·고유 제약조건·외래 키로 보장할 수 있는 데이터 규칙을 확인합니다.
+
+### 권한과 RLS
+
+- [PostgreSQL 권한](https://www.postgresql.org/docs/18/ddl-priv.html): 서비스 계정에 필요한 객체별 권한과 소유권에 따른 권한을 확인합니다.
+- [PostgreSQL 행 수준 보안](https://www.postgresql.org/docs/18/ddl-rowsecurity.html): 행 접근 조건이 적용되는 방식과 역할·소유권에 따른 적용 예외를 확인합니다.
+
+### 트랜잭션 범위 설정
+
+- [PostgreSQL SET](https://www.postgresql.org/docs/18/sql-set.html): `SET LOCAL`의 적용 범위와 트랜잭션 종료 후 설정이 복원되는 동작을 확인합니다.
