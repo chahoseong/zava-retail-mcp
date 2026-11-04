@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Zava MCP Server Architecture",
+    "output": "docs/ARCHITECTURE.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "MCP Client",
+      "sublabel": "Tool Consumer",
+      "pos": [40, 240],
+      "size": [136, 60]
+    },
+    {
+      "id": "server",
+      "type": "frontend",
+      "label": "server.py",
+      "sublabel": "Protocol Layer",
+      "pos": [230, 240],
+      "size": [140, 60],
+      "tag": "도구·입력·응답"
+    },
+    {
+      "id": "services",
+      "type": "backend",
+      "label": "services.py",
+      "sublabel": "Business Layer",
+      "pos": [440, 240],
+      "size": [150, 60],
+      "tag": "조기 권한 판정"
+    },
+    {
+      "id": "database",
+      "type": "database",
+      "label": "database.py",
+      "sublabel": "Data Access Layer",
+      "pos": [660, 240],
+      "size": [150, 60],
+      "tag": "SQL·RLS·트랜잭션"
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "Primary DB",
+      "pos": [890, 240],
+      "size": [136, 60],
+      "tag": "orders data"
+    },
+    {
+      "id": "settings",
+      "type": "backend",
+      "label": "settings.py",
+      "sublabel": "Configuration",
+      "pos": [230, 100],
+      "size": [140, 60],
+      "tag": "환경 설정"
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "runtime.py",
+      "sublabel": "Runtime Lifecycle",
+      "pos": [660, 100],
+      "size": [150, 60],
+      "tag": "공유 연결 풀"
+    },
+    {
+      "id": "models",
+      "type": "backend",
+      "label": "models.py",
+      "sublabel": "Domain Types",
+      "pos": [440, 370],
+      "size": [150, 60],
+      "tag": "사용자·권한 모델"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "zava_mcp_server Package (__init__.py)",
+      "wraps": ["server", "services", "database", "settings", "runtime", "models"],
+      "pad": 24
+    }
+  ],
+  "connections": [
+    {
+      "id": "client-to-server",
+      "from": "client",
+      "to": "server",
+      "label": "도구 호출",
+      "variant": "emphasis"
+    },
+    {
+      "id": "server-to-services",
+      "from": "server",
+      "to": "services",
+      "label": "요청 위임",
+      "variant": "emphasis"
+    },
+    {
+      "id": "services-to-database",
+      "from": "services",
+      "to": "database",
+      "label": "승인 조회",
+      "variant": "emphasis"
+    },
+    {
+      "id": "database-to-postgres",
+      "from": "database",
+      "to": "postgres",
+      "label": "SQL 실행",
+      "variant": "emphasis"
+    },
+    {
+      "id": "settings-to-server",
+      "from": "settings",
+      "to": "server",
+      "label": "설정 주입",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "runtime-to-database",
+      "from": "runtime",
+      "to": "database",
+      "label": "풀 공급",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "models-to-services",
+      "from": "models",
+      "to": "services",
+      "label": "자료형 참조",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "단일 책임 분리 (7개 모듈)",
+      "items": [
+        "server.py: MCP 도구 등록, 입력 유효성 검증, 개발용 사용자 정보 준비, 결과/오류 응답 변환",
+        "services.py: 작업 및 매장 접근 권한 판단, 비즈니스 규칙 검증, 승인된 조회 요청 위임",
+        "database.py: SQL 실행, 연결 대여/반환, 트랜잭션 관리, 트랜잭션 범위의 매장 ID 설정(RLS 격리)",
+        "runtime/settings/models: 서버 수명 연결 풀, 설정 읽기/검증, 사용자·권한 자료형 분리"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "조기 권한 거부 (Early Rejection)",
+      "items": [
+        "권한 없는 요청은 DB 연결을 대여하기 전 services.py 비즈니스 로직에서 즉시 거부",
+        "권한 없는 요청의 불필요한 연결 점유를 줄임",
+        "비즈니스 거부 예외는 server.py에서 안전한 도구 오류 응답으로 변환되어 클라이언트에 반환"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "자원 수명주기 & 예외/취소 정책",
+      "items": [
+        "runtime.py: 서버 프로세스 수명에 맞춘 공유 연결 풀 1개 생성 및 종료 시 안전한 해제",
+        "database.py: 정상·오류·취소 시 연결·트랜잭션 정리, 정상 완료 후 주문 건수 반환",
+        "취소(Cancellation) 신호는 일반 오류로 변환하지 않고 자원 정리 후 상위로 그대로 전파"
+      ]
+    }
+  ]
+}
