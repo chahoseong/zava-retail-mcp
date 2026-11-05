@@ -32,7 +32,7 @@ def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[SalesSe
             status.started = True
             yield service
 
-    return create_server(lifespan)
+    return create_server(lifespan, settings.user)
 
 
 def main() -> int:

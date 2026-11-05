@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 
+import anyio
 import pytest
 
 from zava_mcp_server.database import (
@@ -101,3 +102,45 @@ async def test_failure_propagates_after_cleanup(stage, error, expected):
         assert caught.value is error
     pool.stage = None
     assert len(await SalesRepository(pool, 0.5).top_products(QUERY)) == 1
+
+
+@pytest.mark.asyncio
+async def test_sdk_cancel_scope_allows_rollback_and_release_to_await():
+    running = anyio.Event()
+
+    class CancellablePool(ProbePool):
+        @asynccontextmanager
+        async def acquire(self, *, timeout):
+            async with super().acquire(timeout=timeout) as connection:
+                try:
+                    yield connection
+                finally:
+                    await anyio.sleep(0)
+                    self.events.append("release-ready")
+
+        @asynccontextmanager
+        async def transaction(self, *, readonly):
+            async with super().transaction(readonly=readonly):
+                try:
+                    yield
+                finally:
+                    await anyio.sleep(0)
+                    self.events.append("rollback-ready")
+
+        async def fetch(self, sql, *args):
+            running.set()
+            await anyio.sleep_forever()
+
+    pool = CancellablePool()
+    async with anyio.create_task_group() as group:
+        group.start_soon(SalesRepository(pool, 0.5).top_products, QUERY)
+        with anyio.fail_after(1):
+            await running.wait()
+        group.cancel_scope.cancel()
+
+    assert pool.events[-4:] == [
+        "rollback-ready",
+        "rollback",
+        "release-ready",
+        "release",
+    ]

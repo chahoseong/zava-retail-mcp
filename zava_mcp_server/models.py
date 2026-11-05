@@ -16,6 +16,16 @@ from pydantic import (
 
 StoreId = Annotated[int, Field(strict=True, gt=0, le=2**31 - 1)]
 SALES_READ = "sales:read"
+
+
+class SalesQueryError(RuntimeError):
+    """원본 DB 오류를 숨기는 매출 조회 실패."""
+
+
+class SalesQueryTimeoutError(SalesQueryError):
+    """매출 조회 중 시간 초과."""
+
+
 _store_id_adapter = TypeAdapter(StoreId, config=ConfigDict(hide_input_in_errors=True))
 
 

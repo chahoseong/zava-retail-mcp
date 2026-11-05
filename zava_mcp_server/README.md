@@ -51,10 +51,41 @@ uv run --locked --env-file .env.reader python -m zava_mcp_server
 uv run --locked python scripts/check_mcp_server.py http://127.0.0.1:8000/mcp
 ```
 
-도구가 등록되지 않은 현재 단계의 예상 출력은 `[]`이며, 정상 종료 코드는 `0`이다.
+`get_top_products`가 등록되어 있으므로 예상 출력은 `["get_top_products"]`이며, 정상 종료 코드는 `0`이다.
 이 결과는 실제 HTTP를 통한 MCP 도구 목록 조회가 성공했음을 뜻한다.
 클라이언트는 통신에 15초 제한을 두며 실패하면 오류 안내와 종료 코드 `1`을 반환한다.
-이후 도구를 추가하면 도구 이름 목록을 출력한다.
+
+도구의 입출력 스키마와 실제 조회 결과를 보려면, 서버를 실행한 상태에서 두 번째 터미널에
+아래 명령을 입력한다. 개발용 사용자가 매장 1을 조회할 수 있어야 한다.
+
+```powershell
+@'
+import asyncio
+import json
+from mcp import Client
+
+async def main():
+    async with Client("http://127.0.0.1:8000/mcp") as client:
+        for tool in (await client.list_tools()).tools:
+            print(tool.model_dump_json(by_alias=True, exclude_none=True))
+        result = await client.call_tool("get_top_products", {
+            "store_id": 1,
+            "start_date": "2020-01-01",
+            "end_date": "2020-01-31",
+            "limit": 5,
+        })
+        print(json.dumps(result.model_dump(mode="json", by_alias=True), ensure_ascii=False, indent=2))
+        if result.is_error:
+            raise SystemExit(1)
+
+asyncio.run(main())
+'@ | uv run --locked python -
+```
+
+예제의 구조화된 결과에는 순서대로 상품 ID `400`, `403`, `402`, `36`, `423`이
+들어간다. 집계 금액은 각각 `"4044.96"`, `"3897.79"`, `"3879.16"`, `"3875.13"`,
+`"3772.62"`다. 거래가 없는 기간의 성공 응답은 `products: []`를 포함한다.
+권한, 업무 조건, DB 오류 및 시간 초과는 `isError`가 참인 도구 결과로 전달된다.
 
 기본 주소는 `http://127.0.0.1:8000/mcp`다. `.env.reader`의 `MCP_PORT`나 `MCP_PATH`를
 변경했다면 클라이언트 URL도 맞춘다. 서버 실행은 `MCP_HOST=127.0.0.1`만 허용한다.
@@ -152,7 +183,7 @@ asyncio.run(main())
 CSV로 독립 집계한 순위·금액과 비교한다.
 
 ```powershell
-uv run --locked pytest tests/test_services.py tests/test_database.py tests/test_runtime.py -q -o asyncio_default_fixture_loop_scope=function
+uv run --locked pytest tests/test_server.py tests/test_services.py tests/test_database.py tests/test_runtime.py -q -o asyncio_default_fixture_loop_scope=function
 ```
 
 ---
