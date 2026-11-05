@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from .models import UserContext
+from .schema_service import SchemaService
 from .services import SalesService
 
 
@@ -10,3 +11,4 @@ from .services import SalesService
 class ServerContext:
     service: SalesService
     user: UserContext
+    schema_service: SchemaService

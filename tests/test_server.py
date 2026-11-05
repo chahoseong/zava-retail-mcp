@@ -16,6 +16,7 @@ from zava_mcp_server.models import (
     SalesSummaryQuery,
     UserContext,
 )
+from zava_mcp_server.schema_service import SchemaService, TableSchema
 from zava_mcp_server.server import create_server
 from zava_mcp_server.server_context import ServerContext
 from zava_mcp_server.services import SalesService
@@ -26,6 +27,7 @@ TOOL = "get_top_products"
 SUMMARY_TOOL = "get_sales_summary"
 SUMMARY_ARGS = {key: value for key, value in ARGS.items() if key != "limit"}
 COMPARE_TOOL = "compare_store_sales"
+SCHEMA_TOOL = "get_table_schema"
 COMPARE_ACTIONS = ("sales:read", "sales:compare")
 COMPARE_ARGS = {
     "store_ids": [2, 1, 2],
@@ -34,7 +36,7 @@ COMPARE_ARGS = {
 }
 
 
-def server_for(service, actions=("sales:read",), stores=(1,)):
+def server_for(service, actions=("sales:read",), stores=(1,), schema_repository=None):
     user = UserContext.model_validate(
         {
             "user_id": "test",
@@ -45,7 +47,13 @@ def server_for(service, actions=("sales:read",), stores=(1,)):
 
     @asynccontextmanager
     async def lifespan(_):
-        yield ServerContext(service=service, user=user)
+        yield ServerContext(
+            service=service,
+            user=user,
+            schema_service=SchemaService(
+                schema_repository if schema_repository is not None else AsyncMock()
+            ),
+        )
 
     return create_server(lifespan)
 
@@ -58,7 +66,12 @@ async def test_tool_contract_and_decimal_response():
     ]
     async with Client(server_for(service)) as client:
         tools = (await client.list_tools()).tools
-        assert {tool.name for tool in tools} == {TOOL, SUMMARY_TOOL, COMPARE_TOOL}
+        assert {tool.name for tool in tools} == {
+            TOOL,
+            SUMMARY_TOOL,
+            COMPARE_TOOL,
+            SCHEMA_TOOL,
+        }
         tool = tools[0]
         assert "거래 금액" in tool.description
         assert (
@@ -314,3 +327,70 @@ async def test_compare_db_failure_discards_partial_results(error, message):
         2,
         1,
     ]
+
+
+@pytest.mark.asyncio
+async def test_table_schema_filters_foreign_keys_by_schema_and_table():
+    repo = AsyncMock()
+    order_key = {
+        "constrained_columns": ["order_id", "store_id"],
+        "referenced_table": "orders",
+        "referenced_columns": ["order_id", "store_id"],
+    }
+    columns = [
+        {"column_name": "order_id", "data_type": "integer", "is_nullable": False}
+    ]
+    repo.table_schema.return_value = TableSchema.model_validate(
+        {
+            "columns": columns,
+            "primary_key": ["order_id", "store_id"],
+            "foreign_keys": [
+                order_key | {"referenced_schema": "retail"},
+                order_key | {"referenced_schema": "other"},
+                order_key
+                | {"referenced_schema": "retail", "referenced_table": "customers"},
+            ],
+        }
+    )
+    async with Client(server_for(AsyncMock(), ("schema:read",), (), repo)) as client:
+        result = await client.call_tool(SCHEMA_TOOL, {"table_name": "order_items"})
+    assert not result.is_error
+    assert result.structured_content == {
+        "table_name": "order_items",
+        "columns": columns,
+        "primary_key": ["order_id", "store_id"],
+        "foreign_keys": [order_key],
+    }
+    repo.table_schema.assert_awaited_once_with("retail", "order_items")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actions, table_name, message",
+    [
+        (("sales:read",), "orders", "스키마 정보 조회 권한이 없습니다"),
+        (("schema:read",), "customers", "공개 대상이 아닌 테이블"),
+        (("schema:read",), "other.orders", "공개 대상이 아닌 테이블"),
+    ],
+)
+async def test_table_schema_rejects_before_repository(actions, table_name, message):
+    repo = AsyncMock()
+    async with Client(server_for(AsyncMock(), actions, (), repo)) as client:
+        result = await client.call_tool(SCHEMA_TOOL, {"table_name": table_name})
+    assert result.is_error
+    assert message in result.content[0].text
+    repo.table_schema.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_table_schema_missing_public_table_uses_same_error():
+    repo = AsyncMock()
+    repo.table_schema.return_value = None
+    async with Client(server_for(AsyncMock(), ("schema:read",), (), repo)) as client:
+        result = await client.call_tool(SCHEMA_TOOL, {"table_name": "orders"})
+    assert result.is_error
+    assert (
+        "공개 대상이 아닌 테이블이거나 존재하지 않는 테이블입니다"
+        in result.content[0].text
+    )
+    repo.table_schema.assert_awaited_once_with("retail", "orders")

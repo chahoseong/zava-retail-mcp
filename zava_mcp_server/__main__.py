@@ -9,18 +9,12 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .database import SalesRepository
 from .runtime import RuntimeStatus, open_runtime
+from .schema_repository import SchemaRepository
+from .schema_service import SchemaService
 from .server import create_server
 from .server_context import ServerContext
 from .services import SalesService
 from .settings import Settings, SettingsError, load_settings
-
-
-@asynccontextmanager
-async def open_sales_service(settings: Settings) -> AsyncGenerator[SalesService, None]:
-    """공유 풀의 수명 동안 사용할 매출 서비스를 구성한다."""
-    async with open_runtime(settings) as context:
-        repository = SalesRepository(context.pool, context.acquire_timeout)
-        yield SalesService(repository)
 
 
 def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[ServerContext]:
@@ -29,9 +23,18 @@ def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[ServerC
         _: MCPServer[ServerContext],
     ) -> AsyncGenerator[ServerContext, None]:
         status.started = False
-        async with open_sales_service(settings) as service:
+        async with open_runtime(settings) as runtime:
+            context = ServerContext(
+                service=SalesService(
+                    SalesRepository(runtime.pool, runtime.acquire_timeout)
+                ),
+                user=settings.user,
+                schema_service=SchemaService(
+                    SchemaRepository(runtime.pool, runtime.acquire_timeout)
+                ),
+            )
             status.started = True
-            yield ServerContext(service=service, user=settings.user)
+            yield context
 
     return create_server(lifespan)
 
