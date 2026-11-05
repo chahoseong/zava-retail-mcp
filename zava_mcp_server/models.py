@@ -16,6 +16,7 @@ from pydantic import (
 
 StoreId = Annotated[int, Field(strict=True, gt=0, le=2**31 - 1)]
 SALES_READ = "sales:read"
+SALES_COMPARE = "sales:compare"
 
 
 class SalesQueryError(RuntimeError):
@@ -73,7 +74,7 @@ class UserContext(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     user_id: str = Field(strict=True, min_length=1)
-    allowed_actions: frozenset[Literal["sales:read"]]
+    allowed_actions: frozenset[Literal["sales:read", "sales:compare"]]
     allowed_store_ids: frozenset[StoreId]
 
     @field_validator("user_id")

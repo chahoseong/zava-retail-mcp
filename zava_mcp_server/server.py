@@ -6,6 +6,7 @@ from contextlib import AbstractAsyncContextManager
 from mcp.server import MCPServer
 
 from .server_context import ServerContext
+from .tools.compare_store_sales import compare_store_sales
 from .tools.sales_summary import get_sales_summary
 from .tools.top_products import get_top_products
 
@@ -18,4 +19,5 @@ def create_server(
     server = MCPServer(name="Zava Retail MCP", version="0.1.0", lifespan=lifespan)
     server.add_tool(get_top_products, structured_output=True)
     server.add_tool(get_sales_summary, structured_output=True)
+    server.add_tool(compare_store_sales, structured_output=True)
     return server

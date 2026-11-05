@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from mcp import Client
 
@@ -24,14 +25,21 @@ SECRET = "FAKE_DRIVER_SECRET"
 TOOL = "get_top_products"
 SUMMARY_TOOL = "get_sales_summary"
 SUMMARY_ARGS = {key: value for key, value in ARGS.items() if key != "limit"}
+COMPARE_TOOL = "compare_store_sales"
+COMPARE_ACTIONS = ("sales:read", "sales:compare")
+COMPARE_ARGS = {
+    "store_ids": [2, 1, 2],
+    "start_date": "2020-01-01",
+    "end_date": "2020-01-31",
+}
 
 
-def server_for(service, actions=("sales:read",)):
+def server_for(service, actions=("sales:read",), stores=(1,)):
     user = UserContext.model_validate(
         {
             "user_id": "test",
             "allowed_actions": list(actions),
-            "allowed_store_ids": [1],
+            "allowed_store_ids": list(stores),
         }
     )
 
@@ -50,7 +58,7 @@ async def test_tool_contract_and_decimal_response():
     ]
     async with Client(server_for(service)) as client:
         tools = (await client.list_tools()).tools
-        assert {tool.name for tool in tools} == {TOOL, SUMMARY_TOOL}
+        assert {tool.name for tool in tools} == {TOOL, SUMMARY_TOOL, COMPARE_TOOL}
         tool = tools[0]
         assert "거래 금액" in tool.description
         assert (
@@ -210,3 +218,99 @@ async def test_sales_summary_rejection_does_not_call_repository(
     if message:
         assert message in result.content[0].text
     repo.sales_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stores", [(2, 1), tuple(range(10, 0, -1))])
+async def test_compare_store_sales_preserves_order_and_awaits_each_store(stores):
+    completed = []
+    started = []
+
+    async def summarize(query):
+        assert started == completed
+        assert query == SalesSummaryQuery(
+            stores[len(completed)], date(2020, 1, 1), date(2020, 1, 31)
+        )
+        started.append(query.store_id)
+        await anyio.sleep(0)
+        completed.append(query.store_id)
+        return SalesSummary(Decimal("125.3"), 2)
+
+    repo = AsyncMock()
+    repo.sales_summary.side_effect = summarize
+    args = COMPARE_ARGS | {"store_ids": [*stores, stores[0]]}
+    async with Client(
+        server_for(SalesService(repo), COMPARE_ACTIONS, stores)
+    ) as client:
+        result = await client.call_tool(COMPARE_TOOL, args)
+    assert not result.is_error
+    assert completed == list(stores)
+    assert result.structured_content == {
+        "start_date": args["start_date"],
+        "end_date": args["end_date"],
+        "stores": [
+            {"store_id": store_id, "total_sales": "125.30", "order_count": 2}
+            for store_id in stores
+        ],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes, actions, stores, message",
+    [
+        ({}, ("sales:compare",), (1, 2), "매출 비교 권한"),
+        ({}, ("sales:read",), (1,), "매출 비교 권한"),
+        ({}, COMPARE_ACTIONS, (2,), "매출 비교 권한"),
+        ({"store_ids": []}, COMPARE_ACTIONS, (1, 2), "2개 이상 10개 이하"),
+        ({"store_ids": [1, 1]}, COMPARE_ACTIONS, (1, 2), "2개 이상 10개 이하"),
+        (
+            {"store_ids": list(range(1, 12))},
+            COMPARE_ACTIONS,
+            tuple(range(1, 12)),
+            "2개 이상 10개 이하",
+        ),
+        ({"store_ids": [0, 2]}, COMPARE_ACTIONS, (1, 2), "조회 조건"),
+        ({"store_ids": [True, 2]}, COMPARE_ACTIONS, (1, 2), None),
+        ({"end_date": "2020-02-30"}, COMPARE_ACTIONS, (1, 2), "유효한 달력 날짜"),
+        ({"end_date": "2021-01-01"}, COMPARE_ACTIONS, (1, 2), "조회 조건"),
+    ],
+)
+async def test_compare_rejects_entire_request_before_db(
+    changes, actions, stores, message
+):
+    repo = AsyncMock()
+    async with Client(server_for(SalesService(repo), actions, stores)) as client:
+        result = await client.call_tool(COMPARE_TOOL, COMPARE_ARGS | changes)
+    assert result.is_error
+    assert result.structured_content is None
+    if message:
+        assert message in result.content[0].text
+    repo.sales_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error, message",
+    [
+        (SalesQueryTimeoutError(SECRET), "시간이 초과되었습니다"),
+        (SalesQueryError(SECRET), "데이터베이스에서 매출을 조회하지 못했습니다"),
+    ],
+)
+async def test_compare_db_failure_discards_partial_results(error, message):
+    repo = AsyncMock()
+    repo.sales_summary.side_effect = [SalesSummary(Decimal("125.30"), 2), error]
+    async with Client(
+        server_for(SalesService(repo), COMPARE_ACTIONS, (1, 2, 3))
+    ) as client:
+        result = await client.call_tool(
+            COMPARE_TOOL, COMPARE_ARGS | {"store_ids": [2, 1, 3]}
+        )
+    assert result.is_error
+    assert result.structured_content is None
+    assert message in result.content[0].text
+    assert SECRET not in result.model_dump_json()
+    assert [call.args[0].store_id for call in repo.sales_summary.await_args_list] == [
+        2,
+        1,
+    ]
