@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -16,11 +16,19 @@ READER_ROLE = "zava_mcp_reader"
 
 
 class Connection(Protocol):
-    """준비 확인에 필요한 드라이버 인터페이스."""
+    """준비 확인과 업무 조회에 필요한 드라이버 인터페이스."""
+
+    def transaction(
+        self, *, readonly: bool = False
+    ) -> AbstractAsyncContextManager[None]: ...
 
     async def fetchval(
         self, query: str, *args: object, timeout: float | None = None
     ) -> object: ...
+
+    async def fetch(
+        self, query: str, *args: object
+    ) -> Sequence[Mapping[str, object]]: ...
 
 
 class Pool(Protocol):
@@ -73,7 +81,7 @@ async def _create_pool(settings: Settings) -> Pool:
 
 
 async def _check_ready(pool: Pool, settings: Settings) -> None:
-    """행 존재 여부와 무관하게 실제 계정과 orders 조회 가능 여부를 확인한다."""
+    """실제 계정과 매출 집계에 필요한 열의 조회 권한을 확인한다."""
     async with pool.acquire(timeout=settings.pool.acquire_timeout) as connection:
         expected_role = await connection.fetchval(
             "SELECT current_user::text = $1 AND session_user::text = $1",
@@ -82,10 +90,13 @@ async def _check_ready(pool: Pool, settings: Settings) -> None:
         )
         if expected_role is not True:
             raise RuntimeStartupError("조회 계정이 일치하지 않습니다")
-        await connection.fetchval(
-            "SELECT order_id FROM retail.orders LIMIT 1",
-            timeout=settings.pool.query_timeout,
-        )
+        for query in (
+            "SELECT order_id, store_id, order_date FROM retail.orders LIMIT 0",
+            "SELECT order_id, store_id, product_id, total_amount "
+            "FROM retail.order_items LIMIT 0",
+            "SELECT product_id, product_name FROM retail.products LIMIT 0",
+        ):
+            await connection.fetchval(query, timeout=settings.pool.query_timeout)
 
 
 async def _close_pool(pool: Pool, timeout: float) -> None:
@@ -126,7 +137,7 @@ async def open_runtime(settings: Settings) -> AsyncGenerator[RuntimeContext, Non
             logger.error(message)
             raise RuntimeStartupError(message) from None
 
-        logger.info("DB 준비 완료: 조회 계정 및 orders 조회 확인")
+        logger.info("DB 준비 완료: 조회 계정 및 매출 집계 테이블 확인")
         yield RuntimeContext(pool=pool, acquire_timeout=settings.pool.acquire_timeout)
     finally:
         if pool is not None:

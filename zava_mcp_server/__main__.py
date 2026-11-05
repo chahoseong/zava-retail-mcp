@@ -1,12 +1,38 @@
 """검증된 설정으로 로컬 Streamable HTTP 서버를 실행한다."""
 
 import sys
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
+from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .runtime import RuntimeStatus
+from .database import SalesRepository
+from .runtime import RuntimeStatus, open_runtime
 from .server import create_server
-from .settings import SettingsError, load_settings
+from .services import SalesService
+from .settings import Settings, SettingsError, load_settings
+
+
+@asynccontextmanager
+async def open_sales_service(settings: Settings) -> AsyncGenerator[SalesService, None]:
+    """공유 풀의 수명 동안 사용할 매출 서비스를 구성한다."""
+    async with open_runtime(settings) as context:
+        repository = SalesRepository(context.pool, context.acquire_timeout)
+        yield SalesService(repository)
+
+
+def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[SalesService]:
+    @asynccontextmanager
+    async def lifespan(
+        _: MCPServer[SalesService],
+    ) -> AsyncGenerator[SalesService, None]:
+        status.started = False
+        async with open_sales_service(settings) as service:
+            status.started = True
+            yield service
+
+    return create_server(lifespan)
 
 
 def main() -> int:
@@ -26,7 +52,7 @@ def main() -> int:
         allowed_origins=[f"http://{authority}"],
     )
     status = RuntimeStatus()
-    server = create_server(settings, status)
+    server = build_server(settings, status)
     try:
         server.run(
             transport="streamable-http",

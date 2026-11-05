@@ -4,12 +4,14 @@ PostgreSQL의 행 수준 보안(Row-Level Security, RLS)을 적용하여 소매 
 
 ## 패키지 구성
 
-- `models.py`: 도메인 및 프로토콜 Pydantic 데이터 모델
+- `models.py`: 사용자 권한, 매출 조회 조건과 결과 모델
 - `settings.py`: 불변 설정 로딩, 환경변수 및 개발용 사용자 권한 검증
 - `server.py`: MCP 서버 객체 구성
-- `__main__.py`: 설정 검증 및 Streamable HTTP 서버 실행 진입점
+- `__main__.py`: 설정 검증, 매출 서비스 구성 및 서버 실행
 - `runtime.py`: 공유 DB 연결 풀 생성, 시작 준비 확인 및 종료 정리
-- *(후속 단계)*: 매장별 데이터 접근 및 주문 조회 도구
+- `services.py`: 작업·매장 권한과 조회 조건 확인 후 리포지토리 호출
+- `database.py`: 트랜잭션 범위의 RLS 설정과 상품별 매출 집계
+- *(후속 단계)*: 매출 상위 상품 조회 MCP 도구 등록
 
 ---
 
@@ -61,7 +63,7 @@ Host는 `127.0.0.1:<실행 포트>`, Origin은 `http://127.0.0.1:<실행 포트>
 Origin 헤더가 없는 SDK 요청은 허용하며, `localhost` 별칭과 다른 포트·출처는 허용하지 않는다.
 
 설정 검증에 실패하면 요청을 받기 전에 종료 코드 `1`로 종료한다.
-설정 검증 후 DB 연결 풀을 생성하고 조회 계정과 `retail.orders` 조회 가능 여부를 확인한다.
+설정 검증 후 DB 연결 풀을 생성하고 조회 계정과 매출 집계 테이블의 조회 가능 여부를 확인한다.
 DB가 실행 중이고 조회 계정 설정이 유효해야 시작할 수 있다. 준비 실패 시에도 종료 코드는 `1`이다.
 서버를 종료하려면 첫 번째 터미널에서 `Ctrl+C`를 누르고 종료 완료를 확인한다.
 
@@ -72,8 +74,7 @@ DB가 실행 중이고 조회 계정 설정이 유효해야 시작할 수 있다
 서버 시작 시 공유 풀 하나를 생성하고 SDK Lifespan으로 종료 시까지 관리한다.
 서버 객체 구성이나 모듈 import만으로 DB에 접속하지 않는다.
 설정의 접속 사용자와 DB의 실제 `current_user`·`session_user`가 모두 `zava_mcp_reader`여야 한다.
-이후 `SELECT order_id FROM retail.orders LIMIT 1`의 실행 성공을 확인한다.
-RLS 매장 정보가 없어 빈 결과가 나와도 정상이며, 조회한 값은 출력하지 않는다.
+`orders`, `order_items`, `products`의 필수 열을 `LIMIT 0`으로 조회해 접근 가능 여부를 확인한다.
 이 확인은 테이블 조회 준비 검사이며 매장 권한이나 RLS 격리 정확성 검증은 아니다.
 
 | 설정 | 적용 대상 |
@@ -86,7 +87,7 @@ RLS 매장 정보가 없어 빈 결과가 나와도 정상이며, 조회한 값�
 
 준비 확인용 연결은 성공·실패 모두에서 반환한다. 최소 연결 수가 `0`이어도 준비 확인에서
 실제 연결을 빌려 검사한다. 준비를 통과한 풀과 대여 시간 제한은 `RuntimeContext`로 공유한다.
-후속 데이터 접근 코드는 이 풀을 전달받아 사용하며 요청마다 새 풀을 만들지 않는다.
+서버 시작 시 매출 리포지토리에 이 풀과 대여 제한을 전달한다.
 
 풀 생성 후 준비 실패와 정상 종료에서는 시간 제한 안에서 풀을 닫는다.
 초기 풀 생성 도중 실패하거나 취소된 연결은 고정된 asyncpg 0.32 드라이버가 정리한다.
@@ -105,6 +106,54 @@ uv run --locked python -m pytest tests/test_runtime.py -q -o asyncio_default_fix
 `DB 풀 강제 정리 완료`는 시간 초과 등으로 정상 종료 대신 강제 정리한 결과다.
 자동 테스트는 실패 경로의 정리·반환을 검사하며, 실제 확인에서는 DB 접속·HTTP 응답과
 풀의 종료 상태도 함께 확인한다. 로그 한 줄만으로 자원 정리가 완료됐다고 판단하지 않는다.
+
+---
+
+## 매장별 매출 상위 상품 조회 (내부 기능)
+
+서버 시작 시 `__main__.py`의 `open_sales_service()`가 `runtime.py`의 공유 풀로
+`SalesRepository`를 만들고 `SalesService`에 전달한다. `server.py`는 이 서비스를
+제공하는 수명주기를 SDK에 등록한다.
+
+`SalesService.top_products(user, query)`는 `sales:read`, 매장 권한, 조회 기간과 결과 수를
+확인한다. 시작일과 종료일을 모두 포함해 1~366일을 허용하고, 결과 수는 1~20 사이의 정수다.
+권한이나 조건 검사에서 실패하면 연결을 빌리기 전에 거부한다.
+
+리포지토리는 같은 연결의 읽기 전용 트랜잭션에서 매장 ID를 설정하고 상품별
+`order_items.total_amount`를 합산한다. 집계 금액 내림차순과 상품 ID 오름차순으로 정렬한다.
+연결을 반환한 뒤 상품 ID·상품명·`Decimal` 집계 금액을 전달한다. 거래가 없는 기간은 `[]`다.
+`SalesQueryTimeoutError`는 `SalesQueryError`의 하위 타입이다. 권한 오류와 잘못된 조회 조건은
+각각 `PermissionDeniedError`와 `ValueError`로 전달하며, 취소는 `CancelledError`로 전파한다.
+
+프로젝트 루트에서 서버와 같은 서비스 구성 경로를 내부 호출로 확인할 수 있다.
+아래 매장 ID는 개발용 사용자의 허용 목록에 맞춘다.
+
+```powershell
+@'
+import asyncio
+from datetime import date
+from zava_mcp_server.__main__ import open_sales_service
+from zava_mcp_server.models import SalesQuery
+from zava_mcp_server.settings import load_settings
+
+async def main():
+    settings = load_settings()
+    query = SalesQuery(1, date(2020, 1, 1), date(2020, 1, 31), 5)
+    async with open_sales_service(settings) as service:
+        for row in await service.top_products(settings.user, query):
+            print(row.product_id, row.product_name, row.total_amount)
+
+asyncio.run(main())
+'@ | uv run --locked --env-file .env.reader python -
+```
+
+자동 테스트는 DB 대역을 사용해 권한 거부, 날짜·결과 수 경계, 트랜잭션과 연결 정리,
+서버 수명주기의 서비스 구성을 확인한다. 실제 집계는 조회 계정의 읽기 전용 검증에서
+CSV로 독립 집계한 순위·금액과 비교한다.
+
+```powershell
+uv run --locked pytest tests/test_services.py tests/test_database.py tests/test_runtime.py -q -o asyncio_default_fixture_loop_scope=function
+```
 
 ---
 
@@ -159,7 +208,7 @@ uv run --locked mypy zava_mcp_server
 ```json
 {
   "user_id": "dev-manager",
-  "allowed_actions": ["orders:count"],
+  "allowed_actions": ["sales:read"],
   "allowed_store_ids": [1]
 }
 ```

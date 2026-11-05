@@ -1,5 +1,5 @@
 {
   "user_id": "dev-manager",
-  "allowed_actions": ["orders:count"],
+  "allowed_actions": ["sales:read"],
   "allowed_store_ids": [1]
 }

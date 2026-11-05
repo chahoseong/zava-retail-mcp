@@ -4,14 +4,15 @@ import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
+from datetime import date
 from unittest.mock import AsyncMock
 
 import pytest
 
 from zava_mcp_server import __main__ as entrypoint
 from zava_mcp_server import runtime
-from zava_mcp_server.server import create_server
-from zava_mcp_server.settings import load_settings
+from zava_mcp_server.models import SalesQuery
+from zava_mcp_server.settings import SettingsError, load_settings
 
 SECRET = "FAKE_RUNTIME_SECRET"
 
@@ -58,13 +59,21 @@ class FakePool:
         finally:
             self.released += 1
 
-    async def fetchval(self, query, *args, timeout):
+    async def fetchval(self, query, *args, timeout=None):
         self.queries.append((query, args, timeout))
         if len(self.queries) == 1:
             return self.role
         if self.failure is not None:
             raise self.failure
         return self.row
+
+    @asynccontextmanager
+    async def transaction(self, *, readonly):
+        assert readonly
+        yield
+
+    async def fetch(self, query, *args):
+        return []
 
     async def close(self):
         assert self.acquired == self.released
@@ -96,7 +105,9 @@ async def test_ready_shares_pool_and_returns_connection(settings, monkeypatch, r
         assert pool.queries[0][1] == ("zava_mcp_reader",)
         assert "current_user" in pool.queries[0][0]
         assert "session_user" in pool.queries[0][0]
-        assert pool.queries[1][0] == "SELECT order_id FROM retail.orders LIMIT 1"
+        assert [
+            query.split("FROM ")[1].split()[0] for query, _, _ in pool.queries[1:]
+        ] == ["retail.orders", "retail.order_items", "retail.products"]
         assert not pool.closed
 
     factory.assert_awaited_once_with(settings)
@@ -263,12 +274,19 @@ async def test_server_factory_is_lazy_and_lifespan_publishes_context(
     factory = AsyncMock(return_value=pool)
     monkeypatch.setattr(runtime, "_create_pool", factory)
     status = runtime.RuntimeStatus()
-    server = create_server(settings, status)
+    server = entrypoint.build_server(settings, status)
     factory.assert_not_called()
     assert not status.started
-    async with server.settings.lifespan(server) as context:
-        assert context.pool is pool
+    async with server.settings.lifespan(server) as service:
         assert status.started
+        assert (
+            await service.top_products(
+                settings.user, SalesQuery(1, date(2025, 1, 1), date(2025, 1, 1), 1)
+            )
+            == []
+        )
+        assert pool.acquired == pool.released == 2
+    factory.assert_awaited_once_with(settings)
     assert pool.closed
 
 
@@ -289,9 +307,30 @@ def test_entrypoint_returns_failure_when_sdk_handles_startup_error(
         if sdk_exit is not None:
             raise SystemExit(sdk_exit)
 
-    monkeypatch.setattr(entrypoint, "create_server", create_server)
     from mcp.server import MCPServer
 
     monkeypatch.setattr(MCPServer, "run", sdk_run)
     assert entrypoint.main() == 1
     assert SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("action", ["orders:count", "sales:unknown"])
+def test_settings_rejects_unrecognized_sales_permission(tmp_path, action):
+    path = tmp_path / "user.json"
+    path.write_text(
+        '{"user_id":"test","allowed_actions":["'
+        + action
+        + '"],"allowed_store_ids":[1]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SettingsError):
+        load_settings(
+            {
+                "POSTGRES_HOST": "127.0.0.1",
+                "POSTGRES_PORT": "5432",
+                "POSTGRES_DB": "zava",
+                "POSTGRES_USER": "zava_mcp_reader",
+                "POSTGRES_PASSWORD": SECRET,
+                "DEV_USER_FILE": str(path),
+            }
+        )
