@@ -32,3 +32,6 @@ python_version = "3.12"
 files = ["zava_mcp_server"]
 strict = true
 plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

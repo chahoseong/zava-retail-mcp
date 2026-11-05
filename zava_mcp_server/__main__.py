@@ -4,6 +4,7 @@ import sys
 
 from mcp.server.transport_security import TransportSecuritySettings
 
+from .runtime import RuntimeStatus
 from .server import create_server
 from .settings import SettingsError, load_settings
 
@@ -24,15 +25,22 @@ def main() -> int:
         allowed_hosts=[authority],
         allowed_origins=[f"http://{authority}"],
     )
-    server = create_server()
-    server.run(
-        transport="streamable-http",
-        host=settings.server.host,
-        port=settings.server.port,
-        streamable_http_path=settings.server.path,
-        transport_security=security,
-    )
-    return 0
+    status = RuntimeStatus()
+    server = create_server(settings, status)
+    try:
+        server.run(
+            transport="streamable-http",
+            host=settings.server.host,
+            port=settings.server.port,
+            streamable_http_path=settings.server.path,
+            transport_security=security,
+        )
+    except SystemExit:
+        if status.started:
+            raise
+        return 1
+    # SDK의 HTTP 실행기는 수명주기 시작 실패를 기록하고 반환할 수 있다.
+    return 0 if status.started else 1
 
 
 if __name__ == "__main__":
