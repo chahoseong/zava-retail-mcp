@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StringConstraints,
     TypeAdapter,
     ValidationError,
     field_validator,
@@ -18,6 +19,7 @@ StoreId = Annotated[int, Field(strict=True, gt=0, le=2**31 - 1)]
 SALES_READ = "sales:read"
 SALES_COMPARE = "sales:compare"
 SCHEMA_READ = "schema:read"
+CATALOG_READ = "catalog:read"
 
 
 class SalesQueryError(RuntimeError):
@@ -69,13 +71,42 @@ class ProductSales:
     total_amount: Decimal
 
 
+class ProductSearchInput(BaseModel):
+    """대상 매장에서 취급하는 상품을 의미로 검색하는 조건."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    query: Annotated[
+        str,
+        StringConstraints(
+            strict=True, strip_whitespace=True, min_length=1, max_length=256
+        ),
+    ]
+    store_id: StoreId
+    limit: int = Field(strict=True, ge=1, le=10)
+
+
+class ProductSearchResult(BaseModel):
+    """검색어와 관련 있는 상품 한 건."""
+
+    product_id: int
+    product_name: str
+    product_description: str
+    similarity_score: float = Field(strict=True, ge=-1, le=1, allow_inf_nan=False)
+
+
+type ProductSearchResults = list[ProductSearchResult]
+
+
 class UserContext(BaseModel):
     """서버가 제공하는 개발용 사용자 정보. 실제 인증 결과는 아니다."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     user_id: str = Field(strict=True, min_length=1)
-    allowed_actions: frozenset[Literal["sales:read", "sales:compare", "schema:read"]]
+    allowed_actions: frozenset[
+        Literal["sales:read", "sales:compare", "schema:read", "catalog:read"]
+    ]
     allowed_store_ids: frozenset[StoreId]
 
     @field_validator("user_id")
