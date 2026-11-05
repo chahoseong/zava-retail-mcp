@@ -10,6 +10,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .database import SalesRepository
 from .runtime import RuntimeStatus, open_runtime
 from .server import create_server
+from .server_context import ServerContext
 from .services import SalesService
 from .settings import Settings, SettingsError, load_settings
 
@@ -22,17 +23,17 @@ async def open_sales_service(settings: Settings) -> AsyncGenerator[SalesService,
         yield SalesService(repository)
 
 
-def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[SalesService]:
+def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[ServerContext]:
     @asynccontextmanager
     async def lifespan(
-        _: MCPServer[SalesService],
-    ) -> AsyncGenerator[SalesService, None]:
+        _: MCPServer[ServerContext],
+    ) -> AsyncGenerator[ServerContext, None]:
         status.started = False
         async with open_sales_service(settings) as service:
             status.started = True
-            yield service
+            yield ServerContext(service=service, user=settings.user)
 
-    return create_server(lifespan, settings.user)
+    return create_server(lifespan)
 
 
 def main() -> int:

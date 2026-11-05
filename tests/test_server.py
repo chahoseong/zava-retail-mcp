@@ -11,14 +11,19 @@ from zava_mcp_server.models import (
     SalesQuery,
     SalesQueryError,
     SalesQueryTimeoutError,
+    SalesSummary,
+    SalesSummaryQuery,
     UserContext,
 )
 from zava_mcp_server.server import create_server
+from zava_mcp_server.server_context import ServerContext
 from zava_mcp_server.services import SalesService
 
 ARGS = {"store_id": 1, "start_date": "2020-01-01", "end_date": "2020-01-31", "limit": 5}
 SECRET = "FAKE_DRIVER_SECRET"
 TOOL = "get_top_products"
+SUMMARY_TOOL = "get_sales_summary"
+SUMMARY_ARGS = {key: value for key, value in ARGS.items() if key != "limit"}
 
 
 def server_for(service, actions=("sales:read",)):
@@ -32,9 +37,9 @@ def server_for(service, actions=("sales:read",)):
 
     @asynccontextmanager
     async def lifespan(_):
-        yield service
+        yield ServerContext(service=service, user=user)
 
-    return create_server(lifespan, user)
+    return create_server(lifespan)
 
 
 @pytest.mark.asyncio
@@ -45,7 +50,7 @@ async def test_tool_contract_and_decimal_response():
     ]
     async with Client(server_for(service)) as client:
         tools = (await client.list_tools()).tools
-        assert [tool.name for tool in tools] == [TOOL]
+        assert {tool.name for tool in tools} == {TOOL, SUMMARY_TOOL}
         tool = tools[0]
         assert "거래 금액" in tool.description
         assert (
@@ -129,11 +134,15 @@ async def test_service_rejection_does_not_call_repository(changes, actions, mess
         (SalesQueryTimeoutError(SECRET), "시간이 초과되었습니다"),
     ],
 )
-async def test_db_failures_are_safe_tool_errors(error, message):
+@pytest.mark.parametrize(
+    "tool, args, method",
+    [(TOOL, ARGS, "top_products"), (SUMMARY_TOOL, SUMMARY_ARGS, "sales_summary")],
+)
+async def test_db_failures_are_safe_tool_errors(error, message, tool, args, method):
     service = AsyncMock()
-    service.top_products.side_effect = error
+    getattr(service, method).side_effect = error
     async with Client(server_for(service)) as client:
-        result = await client.call_tool(TOOL, ARGS)
+        result = await client.call_tool(tool, args)
     assert result.is_error
     assert result.structured_content is None
     assert message in result.content[0].text
@@ -148,3 +157,56 @@ async def test_empty_period_is_success():
         result = await client.call_tool(TOOL, ARGS)
     assert not result.is_error
     assert result.structured_content["products"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "amount, count, formatted", [("125.3", 2, "125.30"), ("0", 0, "0.00")]
+)
+async def test_sales_summary_contract(amount, count, formatted):
+    repo = AsyncMock()
+    repo.sales_summary.return_value = SalesSummary(Decimal(amount), count)
+    async with Client(server_for(SalesService(repo))) as client:
+        tools = (await client.list_tools()).tools
+        tool = next(tool for tool in tools if tool.name == SUMMARY_TOOL)
+        assert (
+            set(tool.input_schema["properties"])
+            == set(tool.input_schema["required"])
+            == SUMMARY_ARGS.keys()
+        )
+        assert tool.output_schema["properties"]["total_sales"]["type"] == "string"
+        assert tool.output_schema["properties"]["order_count"]["type"] == "integer"
+        result = await client.call_tool(SUMMARY_TOOL, SUMMARY_ARGS)
+    assert not result.is_error
+    assert result.structured_content == SUMMARY_ARGS | {
+        "total_sales": formatted,
+        "order_count": count,
+    }
+    repo.sales_summary.assert_awaited_once_with(
+        SalesSummaryQuery(1, date(2020, 1, 1), date(2020, 1, 31))
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes, actions, message",
+    [
+        ({"store_id": 2}, ("sales:read",), "권한이 없습니다"),
+        ({}, (), "권한이 없습니다"),
+        ({"start_date": "2020/01/01"}, ("sales:read",), None),
+        ({"start_date": "2020-02-30"}, ("sales:read",), "유효한 달력 날짜"),
+        ({"end_date": "2019-12-31"}, ("sales:read",), "조회 조건"),
+        ({"end_date": "2021-01-01"}, ("sales:read",), "조회 조건"),
+    ],
+)
+async def test_sales_summary_rejection_does_not_call_repository(
+    changes, actions, message
+):
+    repo = AsyncMock()
+    async with Client(server_for(SalesService(repo), actions)) as client:
+        result = await client.call_tool(SUMMARY_TOOL, SUMMARY_ARGS | changes)
+    assert result.is_error
+    assert result.structured_content is None
+    if message:
+        assert message in result.content[0].text
+    repo.sales_summary.assert_not_called()

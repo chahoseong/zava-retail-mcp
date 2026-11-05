@@ -277,11 +277,12 @@ async def test_server_factory_is_lazy_and_lifespan_publishes_context(
     server = entrypoint.build_server(settings, status)
     factory.assert_not_called()
     assert not status.started
-    async with server.settings.lifespan(server) as service:
+    async with server.settings.lifespan(server) as context:
         assert status.started
+        assert context.user is settings.user
         assert (
-            await service.top_products(
-                settings.user, SalesQuery(1, date(2025, 1, 1), date(2025, 1, 1), 1)
+            await context.service.top_products(
+                context.user, SalesQuery(1, date(2025, 1, 1), date(2025, 1, 1), 1)
             )
             == []
         )

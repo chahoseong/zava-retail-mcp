@@ -48,6 +48,19 @@ class SalesQuery:
 
 
 @dataclass(frozen=True)
+class SalesSummaryQuery:
+    store_id: int
+    start_date: date
+    end_date: date
+
+
+@dataclass(frozen=True)
+class SalesSummary:
+    total_sales: Decimal
+    order_count: int
+
+
+@dataclass(frozen=True)
 class ProductSales:
     product_id: int
     product_name: str

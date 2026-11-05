@@ -12,7 +12,12 @@ from zava_mcp_server.database import (
     SalesQueryTimeoutError,
     SalesRepository,
 )
-from zava_mcp_server.models import ProductSales, SalesQuery
+from zava_mcp_server.models import (
+    ProductSales,
+    SalesQuery,
+    SalesSummary,
+    SalesSummaryQuery,
+)
 
 QUERY = SalesQuery(1, date(2025, 1, 1), date(2025, 1, 31), 10)
 ROW = {"product_id": 8, "product_name": "Example", "total_amount": Decimal("125.30")}
@@ -76,6 +81,22 @@ async def test_returns_rows_after_transaction_and_release(rows, expected):
         ("begin", True),
         ("scope", ("1",)),
         ("aggregate", (1, QUERY.start_date, QUERY.end_date, 10)),
+        "commit",
+        "release",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sales_summary_uses_store_scope_and_returns_aggregate():
+    query = SalesSummaryQuery(1, QUERY.start_date, QUERY.end_date)
+    pool = ProbePool([{"total_sales": Decimal("125.30"), "order_count": 2}])
+    result = await SalesRepository(pool, 0.5).sales_summary(query)
+    assert result == SalesSummary(Decimal("125.30"), 2)
+    assert pool.events == [
+        ("acquire", 0.5),
+        ("begin", True),
+        ("scope", ("1",)),
+        ("aggregate", (1, QUERY.start_date, QUERY.end_date)),
         "commit",
         "release",
     ]
