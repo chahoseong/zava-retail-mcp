@@ -40,13 +40,6 @@ uv run --locked pytest
 uv run --locked ruff format zava_mcp_server
 ```
 
-### 설정 검증
-
-```powershell
-# 비밀번호 및 시크릿을 노출하지 않고 설정 객체만 검증
-uv run --locked --env-file .env.reader python -c "from zava_mcp_server.settings import load_settings; s = load_settings(); print(s.server); print(s.pool); print(s.user)"
-```
-
 ---
 
 ## Architecture & Layered Responsibilities

@@ -6,7 +6,9 @@ PostgreSQL의 행 수준 보안(Row-Level Security, RLS)을 적용하여 소매 
 
 - `models.py`: 도메인 및 프로토콜 Pydantic 데이터 모델
 - `settings.py`: 불변 설정 로딩, 환경변수 및 개발용 사용자 권한 검증
-- *(후속 단계)*: 데이터베이스 커넥션 풀 관리(`db/`), MCP 도구 핸들러(`tools/`), 서버 진입점
+- `server.py`: MCP 서버 객체 구성
+- `__main__.py`: 설정 검증 및 Streamable HTTP 서버 실행 진입점
+- *(후속 단계)*: 데이터베이스 커넥션 풀 관리 및 주문 조회 도구
 
 ---
 
@@ -28,6 +30,38 @@ uv run --locked --env-file .env.reader python -c "from zava_mcp_server.settings 
 
 - 새 환경의 DB 접속 정보는 루트의 [.env.reader.example](../.env.reader.example)을 참고하여 실제 조회 계정 정보로 `.env.reader`를 작성한다.
 - `uv`가 환경 파일의 값을 실행 환경에 불러오며, Python 코드는 환경변수만 읽는다. 관리자(`.env`) 설정으로 임의 대체하지 않는다.
+
+---
+
+## 서버 실행 및 HTTP 통신 확인
+
+프로젝트 루트의 첫 번째 터미널에서 실행한다.
+
+```powershell
+uv run --locked --env-file .env.reader python -m zava_mcp_server
+```
+
+두 번째 터미널도 프로젝트 루트에서 열고, 실제 서버 URL로 SDK 클라이언트를 실행한다.
+클라이언트에는 DB 환경 파일이 필요하지 않다.
+
+```powershell
+uv run --locked python scripts/check_mcp_server.py http://127.0.0.1:8000/mcp
+```
+
+도구가 등록되지 않은 현재 단계의 예상 출력은 `[]`이며, 정상 종료 코드는 `0`이다.
+이 결과는 실제 HTTP를 통한 MCP 도구 목록 조회가 성공했음을 뜻한다.
+클라이언트는 통신에 15초 제한을 두며 실패하면 오류 안내와 종료 코드 `1`을 반환한다.
+이후 도구를 추가하면 도구 이름 목록을 출력한다.
+
+기본 주소는 `http://127.0.0.1:8000/mcp`다. `.env.reader`의 `MCP_PORT`나 `MCP_PATH`를
+변경했다면 클라이언트 URL도 맞춘다. 서버 실행은 `MCP_HOST=127.0.0.1`만 허용한다.
+설정 모델의 일반 루프백 주소 검증과 별도로 실행 진입점에서 이 범위를 제한한다.
+Host는 `127.0.0.1:<실행 포트>`, Origin은 `http://127.0.0.1:<실행 포트>`만 허용한다.
+Origin 헤더가 없는 SDK 요청은 허용하며, `localhost` 별칭과 다른 포트·출처는 허용하지 않는다.
+
+설정 검증에 실패하면 요청을 받기 전에 종료 코드 `1`로 종료한다.
+DB 설정과 개발용 사용자 파일도 검증하지만, 아직 DB 접속이나 연결 풀 생성은 하지 않는다.
+서버를 종료하려면 첫 번째 터미널에서 `Ctrl+C`를 누르고 종료 완료를 확인한다.
 
 ---
 
