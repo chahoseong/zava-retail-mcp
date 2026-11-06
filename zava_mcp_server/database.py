@@ -33,6 +33,29 @@ WHERE o.store_id = $1 AND o.order_date BETWEEN $2 AND $3
 """
 
 
+@asynccontextmanager
+async def open_store_connection(
+    pool: Pool, acquire_timeout: float, store_id: int
+) -> AsyncGenerator[Connection, None]:
+    """승인된 매장으로 범위를 제한한 읽기 전용 연결을 제공한다."""
+    with CancelScope() as cleanup:
+        async with AsyncExitStack() as resources:
+            try:
+                connection = await resources.enter_async_context(
+                    pool.acquire(timeout=acquire_timeout)
+                )
+                await resources.enter_async_context(
+                    connection.transaction(readonly=True)
+                )
+                await connection.fetchval(
+                    "SELECT set_config('app.current_store_id', $1, true)", str(store_id)
+                )
+                yield connection
+            finally:
+                # 취소는 조회에 전달하고 트랜잭션 종료와 풀 반환은 완료한다.
+                cleanup.shield = True
+
+
 class SalesRepository:
     def __init__(self, pool: Pool, acquire_timeout: float) -> None:
         self._pool = pool
@@ -80,23 +103,10 @@ class SalesRepository:
         self, store_id: int
     ) -> AsyncGenerator[Connection, None]:
         try:
-            with CancelScope() as cleanup:
-                async with AsyncExitStack() as resources:
-                    try:
-                        connection = await resources.enter_async_context(
-                            self._pool.acquire(timeout=self._acquire_timeout)
-                        )
-                        await resources.enter_async_context(
-                            connection.transaction(readonly=True)
-                        )
-                        await connection.fetchval(
-                            "SELECT set_config('app.current_store_id', $1, true)",
-                            str(store_id),
-                        )
-                        yield connection
-                    finally:
-                        # 취소는 조회에 전달하고 트랜잭션 종료와 풀 반환은 완료한다.
-                        cleanup.shield = True
+            async with open_store_connection(
+                self._pool, self._acquire_timeout, store_id
+            ) as connection:
+                yield connection
         except TimeoutError:
             raise SalesQueryTimeoutError("매출 조회 중 시간이 초과되었습니다") from None
         except Exception:

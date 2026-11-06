@@ -5,13 +5,14 @@ import logging
 import traceback
 from contextlib import asynccontextmanager
 from datetime import date
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from mcp import Client
 
 from zava_mcp_server import __main__ as entrypoint
 from zava_mcp_server import runtime
-from zava_mcp_server.models import SalesQuery
+from zava_mcp_server.models import SalesQuery, UserContext
 from zava_mcp_server.settings import SettingsError, load_settings
 
 SECRET = "FAKE_RUNTIME_SECRET"
@@ -273,9 +274,12 @@ async def test_server_factory_is_lazy_and_lifespan_publishes_context(
     pool = FakePool()
     factory = AsyncMock(return_value=pool)
     monkeypatch.setattr(runtime, "_create_pool", factory)
+    model = Mock()
+    monkeypatch.setattr(entrypoint.EmbeddingAdapter, "load", model)
     status = runtime.RuntimeStatus()
     server = entrypoint.build_server(settings, status)
     factory.assert_not_called()
+    model.assert_not_called()
     assert not status.started
     async with server.settings.lifespan(server) as context:
         assert status.started
@@ -288,7 +292,49 @@ async def test_server_factory_is_lazy_and_lifespan_publishes_context(
         )
         assert pool.acquired == pool.released == 2
     factory.assert_awaited_once_with(settings)
+    model.assert_called_once_with()
     assert pool.closed
+
+
+@pytest.mark.asyncio
+async def test_model_load_failure_only_disables_product_search(
+    settings, monkeypatch, caplog
+):
+    pool = FakePool()
+    monkeypatch.setattr(runtime, "_create_pool", AsyncMock(return_value=pool))
+    model = Mock(side_effect=OSError(SECRET))
+    monkeypatch.setattr(entrypoint.EmbeddingAdapter, "load", model)
+    user = UserContext.model_validate(
+        {
+            "user_id": "test",
+            "allowed_actions": ["sales:read", "catalog:read"],
+            "allowed_store_ids": [1],
+        }
+    )
+    settings = settings.model_copy(update={"user": user})
+    status = runtime.RuntimeStatus()
+    async with Client(entrypoint.build_server(settings, status)) as client:
+        assert status.started
+        search = await client.call_tool(
+            "search_products", {"query": "workbench", "store_id": 1, "limit": 3}
+        )
+        assert search.is_error
+        assert "상품 검색 모델을 사용할 수 없습니다" in search.content[0].text
+        assert pool.acquired == pool.released == 1
+        sales = await client.call_tool(
+            "get_top_products",
+            {
+                "store_id": 1,
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-01",
+                "limit": 1,
+            },
+        )
+        assert not sales.is_error
+        assert pool.acquired == pool.released == 2
+    model.assert_called_once_with()
+    assert "상품 검색 모델 로딩 실패 (OSError)" in caplog.text
+    assert SECRET not in caplog.text
 
 
 @pytest.mark.parametrize("sdk_exit", [None, 3])

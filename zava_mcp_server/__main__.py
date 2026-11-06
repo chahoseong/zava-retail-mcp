@@ -1,13 +1,18 @@
 """검증된 설정으로 로컬 Streamable HTTP 서버를 실행한다."""
 
+import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from anyio import to_thread
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .database import SalesRepository
+from .embeddings import EmbeddingAdapter
+from .product_search_repository import ProductSearchRepository
+from .product_search_service import ProductSearchService
 from .runtime import RuntimeStatus, open_runtime
 from .schema_repository import SchemaRepository
 from .schema_service import SchemaService
@@ -15,6 +20,8 @@ from .server import create_server
 from .server_context import ServerContext
 from .services import SalesService
 from .settings import Settings, SettingsError, load_settings
+
+logger = logging.getLogger(__name__)
 
 
 def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[ServerContext]:
@@ -24,6 +31,11 @@ def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[ServerC
     ) -> AsyncGenerator[ServerContext, None]:
         status.started = False
         async with open_runtime(settings) as runtime:
+            try:
+                embedder = await to_thread.run_sync(EmbeddingAdapter.load)
+            except Exception as error:
+                logger.warning("상품 검색 모델 로딩 실패 (%s)", type(error).__name__)
+                embedder = None
             context = ServerContext(
                 service=SalesService(
                     SalesRepository(runtime.pool, runtime.acquire_timeout)
@@ -31,6 +43,10 @@ def build_server(settings: Settings, status: RuntimeStatus) -> MCPServer[ServerC
                 user=settings.user,
                 schema_service=SchemaService(
                     SchemaRepository(runtime.pool, runtime.acquire_timeout)
+                ),
+                product_search_service=ProductSearchService(
+                    embedder,
+                    ProductSearchRepository(runtime.pool, runtime.acquire_timeout),
                 ),
             )
             status.started = True

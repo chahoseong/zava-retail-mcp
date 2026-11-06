@@ -14,10 +14,14 @@ from zava_mcp_server.database import (
 )
 from zava_mcp_server.models import (
     ProductSales,
+    ProductSearchInput,
     SalesQuery,
     SalesSummary,
     SalesSummaryQuery,
+    UserContext,
 )
+from zava_mcp_server.product_search_repository import ProductSearchRepository
+from zava_mcp_server.product_search_service import ProductSearchService
 
 QUERY = SalesQuery(1, date(2025, 1, 1), date(2025, 1, 31), 10)
 ROW = {"product_id": 8, "product_name": "Example", "total_amount": Decimal("125.30")}
@@ -63,6 +67,41 @@ class ProbePool:
         if self.stage == "query":
             raise self.failure
         return self.rows
+
+
+@pytest.mark.asyncio
+async def test_search_finishes_embedding_before_borrowing_scoped_connection():
+    pool = ProbePool()
+
+    class Embedder:
+        def embed_query(self, query):
+            assert query == "workbench"
+            pool.events.append("embedding complete")
+            return [1.0, 0.0]
+
+    user = UserContext.model_validate(
+        {
+            "user_id": "test",
+            "allowed_actions": ["catalog:read"],
+            "allowed_store_ids": [1],
+        }
+    )
+    service = ProductSearchService(Embedder(), ProductSearchRepository(pool, 0.5))
+    assert (
+        await service.search(
+            user, ProductSearchInput(query="workbench", store_id=1, limit=3)
+        )
+        == []
+    )
+    assert pool.events == [
+        "embedding complete",
+        ("acquire", 0.5),
+        ("begin", True),
+        ("scope", ("1",)),
+        ("aggregate", (1, "[1.0,0.0]", 3)),
+        "commit",
+        "release",
+    ]
 
 
 @pytest.mark.asyncio

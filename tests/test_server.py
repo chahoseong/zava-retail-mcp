@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from threading import Event
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -9,6 +10,7 @@ from mcp import Client
 
 from zava_mcp_server.models import (
     ProductSales,
+    ProductSearchResult,
     SalesQuery,
     SalesQueryError,
     SalesQueryTimeoutError,
@@ -16,6 +18,7 @@ from zava_mcp_server.models import (
     SalesSummaryQuery,
     UserContext,
 )
+from zava_mcp_server.product_search_service import ProductSearchService
 from zava_mcp_server.schema_service import SchemaService, TableSchema
 from zava_mcp_server.server import create_server
 from zava_mcp_server.server_context import ServerContext
@@ -28,6 +31,8 @@ SUMMARY_TOOL = "get_sales_summary"
 SUMMARY_ARGS = {key: value for key, value in ARGS.items() if key != "limit"}
 COMPARE_TOOL = "compare_store_sales"
 SCHEMA_TOOL = "get_table_schema"
+SEARCH_TOOL = "search_products"
+SEARCH_ARGS = {"query": "  folding workbench  ", "store_id": 1, "limit": 3}
 COMPARE_ACTIONS = ("sales:read", "sales:compare")
 COMPARE_ARGS = {
     "store_ids": [2, 1, 2],
@@ -36,7 +41,13 @@ COMPARE_ARGS = {
 }
 
 
-def server_for(service, actions=("sales:read",), stores=(1,), schema_repository=None):
+def server_for(
+    service,
+    actions=("sales:read",),
+    stores=(1,),
+    schema_repository=None,
+    product_search_service=None,
+):
     user = UserContext.model_validate(
         {
             "user_id": "test",
@@ -52,6 +63,11 @@ def server_for(service, actions=("sales:read",), stores=(1,), schema_repository=
             user=user,
             schema_service=SchemaService(
                 schema_repository if schema_repository is not None else AsyncMock()
+            ),
+            product_search_service=(
+                product_search_service
+                if product_search_service is not None
+                else ProductSearchService(None, AsyncMock())
             ),
         )
 
@@ -71,6 +87,7 @@ async def test_tool_contract_and_decimal_response():
             SUMMARY_TOOL,
             COMPARE_TOOL,
             SCHEMA_TOOL,
+            SEARCH_TOOL,
         }
         tool = tools[0]
         assert "거래 금액" in tool.description
@@ -394,3 +411,129 @@ async def test_table_schema_missing_public_table_uses_same_error():
         in result.content[0].text
     )
     repo.table_schema.assert_awaited_once_with("retail", "orders")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_products", [True, False])
+async def test_product_search_returns_structured_products(has_products):
+    repository = AsyncMock()
+    products = (
+        [
+            ProductSearchResult(
+                product_id=1,
+                product_name="Workbench",
+                product_description="Folding",
+                similarity_score=0.7,
+            )
+        ]
+        if has_products
+        else []
+    )
+    repository.search.return_value = products
+    embedder = Mock()
+    embedder.embed_query.return_value = [0.1]
+    service = ProductSearchService(embedder, repository)
+    async with Client(
+        server_for(AsyncMock(), ("catalog:read",), product_search_service=service)
+    ) as client:
+        tools = (await client.list_tools()).tools
+        tool = next(tool for tool in tools if tool.name == SEARCH_TOOL)
+        assert set(tool.input_schema["required"]) == SEARCH_ARGS.keys()
+        assert tool.output_schema["required"] == ["products"]
+        result = await client.call_tool(SEARCH_TOOL, SEARCH_ARGS)
+    assert not result.is_error
+    assert result.structured_content == {"products": [p.model_dump() for p in products]}
+    embedder.embed_query.assert_called_once_with("folding workbench")
+    repository.search.assert_awaited_once_with(1, [0.1], 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actions, stores, query, message",
+    [
+        (("sales:read",), (1,), "workbench", "상품 검색 권한이 없습니다"),
+        (("catalog:read",), (2,), "workbench", "상품 검색 권한이 없습니다"),
+        (("catalog:read",), (1,), "  ", "상품 검색 조건을 확인하세요"),
+    ],
+)
+async def test_product_search_rejects_before_embedding(actions, stores, query, message):
+    repository, embedder = AsyncMock(), Mock()
+    service = ProductSearchService(embedder, repository)
+    async with Client(
+        server_for(AsyncMock(), actions, stores, product_search_service=service)
+    ) as client:
+        result = await client.call_tool(SEARCH_TOOL, SEARCH_ARGS | {"query": query})
+    assert result.is_error and message in result.content[0].text
+    embedder.embed_query.assert_not_called()
+    repository.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_product_search_embedding_error_does_not_call_repository():
+    repository, embedder = AsyncMock(), Mock()
+    embedder.embed_query.side_effect = ValueError(SECRET)
+    service = ProductSearchService(embedder, repository)
+    async with Client(
+        server_for(AsyncMock(), ("catalog:read",), product_search_service=service)
+    ) as client:
+        result = await client.call_tool(SEARCH_TOOL, SEARCH_ARGS)
+    assert (
+        result.is_error and "검색어를 임베딩하지 못했습니다" in result.content[0].text
+    )
+    assert SECRET not in result.model_dump_json()
+    repository.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_product_search_serializes_inference_without_blocking_other_tools():
+    first_started, release_first = Event(), Event()
+    second_requested = anyio.Event()
+    repository = AsyncMock()
+    repository.search.return_value = []
+    completed = []
+
+    class Embedder:
+        def embed_query(self, query):
+            if query == "first":
+                first_started.set()
+                assert release_first.wait(10)
+            else:
+                assert completed == ["first"]
+            completed.append(query)
+            return [0.1]
+
+    class ObservedService(ProductSearchService):
+        async def search(self, user, request):
+            if request.query == "second":
+                second_requested.set()
+            return await super().search(user, request)
+
+    sales = AsyncMock()
+    sales.top_products.return_value = []
+    service = ObservedService(Embedder(), repository)
+    async with Client(
+        server_for(
+            sales, ("sales:read", "catalog:read"), product_search_service=service
+        )
+    ) as client:
+
+        async def search(query):
+            result = await client.call_tool(SEARCH_TOOL, SEARCH_ARGS | {"query": query})
+            assert not result.is_error
+
+        async with anyio.create_task_group() as group:
+            try:
+                group.start_soon(search, "first")
+                with anyio.fail_after(5):
+                    while not first_started.is_set():
+                        await anyio.sleep(0.01)
+                    group.start_soon(search, "second")
+                    await second_requested.wait()
+                    result = await client.call_tool(TOOL, ARGS)
+                    assert not result.is_error
+                    assert completed == []
+                    repository.search.assert_not_called()
+            finally:
+                release_first.set()
+    assert completed == ["first", "second"]
+    assert repository.search.await_count == 2
