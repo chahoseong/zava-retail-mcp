@@ -41,3 +41,21 @@ uv run --locked --env-file .env python scripts/csv_to_postgres.py data/source/st
 
 - 대상 테이블에 기존 데이터가 있으면 변경 없이 중단하며, 커밋 전 실패하면 이번 적재를 롤백합니다.
 - 커밋 여부가 불명확하거나 커밋 후 검증이 실패하면 재적재 전에 `--verify`와 DB 조회로 확인하세요.
+
+## 상품 임베딩 준비하기
+
+임베딩 저장 구조를 처음 구성할 때는 기존 실습 DB 설정을 마친 뒤 PostgreSQL 관리자로 다음 SQL을 순서대로 실행합니다.
+
+1. [벡터 확장 활성화](../sql/16_vector_extension.sql)
+2. [상품 임베딩 테이블 생성](../sql/17_product_embeddings.sql)
+3. [임베딩 쓰기 역할 생성](../sql/18_embedding_writer_role.sql)
+4. [임베딩 권한 부여](../sql/19_embedding_privileges.sql)
+
+`zava_embedding_writer`의 비밀번호를 설정하고, Git에서 제외된 `.env.embeddings`에 `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`를 설정합니다.
+
+```powershell
+uv sync --locked
+uv run --locked --env-file .env.embeddings python -m scripts.prepare_product_embeddings
+```
+
+첫 실행에서는 고정된 모델 파일을 내려받습니다. 터미널에는 임베딩 진행률이 표시되며, 출력을 파일에 남길 때는 `2> embedding-preparation.log`를 붙이면 단계와 배치 완료 로그가 기록됩니다. 재실행하면 상품별 벡터를 갱신합니다. 모델이나 입력 규약을 변경하면 상품 전체를 다시 임베딩합니다.

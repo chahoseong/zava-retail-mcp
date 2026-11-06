@@ -152,6 +152,7 @@ activemq-data/
 # Environments
 .env
 .env.reader
+.env.embeddings
 /config/dev-user.json
 .envrc
 .venv

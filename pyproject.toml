@@ -6,6 +6,8 @@ dependencies = [
     "mcp==2.3.0",
     "asyncpg==0.32.0",
     "pydantic==2.14.2",
+    "sentence-transformers[image]>=6.1,<7",
+    "rich>=15.0.0",
 ]
 
 [dependency-groups]
